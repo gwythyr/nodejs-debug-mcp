@@ -89,25 +89,52 @@ async function runDebugSession(
 
   const absolutePath = resolve(args.breakpoint.file);
   const fileUrl = pathToFileURL(absolutePath).href;
+  const expectedLineNumber = Math.max(0, args.breakpoint.line);
 
-  await Debugger.setBreakpointByUrl({
+  const setBreakpointResult = await Debugger.setBreakpointByUrl({
     url: fileUrl,
-    lineNumber: Math.max(0, args.breakpoint.line - 1),
+    lineNumber: expectedLineNumber,
     columnNumber: 0,
   });
 
-  return waitForBreakpointAndEvaluate(args, child, client);
+  const breakpointId = setBreakpointResult?.breakpointId ?? '';
+
+  return waitForBreakpointAndEvaluate(
+    args,
+    child,
+    client,
+    breakpointId,
+    fileUrl,
+    expectedLineNumber,
+  );
 }
 
 function waitForBreakpointAndEvaluate(
   args: DebugScriptArguments,
   child: ChildProcess,
   client: Client,
+  breakpointId: string,
+  targetUrl: string,
+  targetLineNumber: number,
 ): Promise<DebugScriptResponse> {
   const { Debugger, Runtime } = client;
+  const emitter = client as unknown as {
+    on(event: string, listener: (...args: unknown[]) => void): void;
+    removeListener(event: string, listener: (...args: unknown[]) => void): void;
+  };
 
   return new Promise<DebugScriptResponse>((resolve) => {
     let settled = false;
+
+    let removePausedListener: (() => void) | null = null;
+    let hasResumed = false;
+    let executionContextDestroyedBeforeResume = false;
+    const handleDisconnect = () => {
+      settle({ error: PROCESS_EXIT_ERROR });
+    };
+    const handleClose = () => {
+      settle({ error: PROCESS_EXIT_ERROR });
+    };
 
     const settle = (result: DebugScriptResponse) => {
       if (settled) {
@@ -116,7 +143,13 @@ function waitForBreakpointAndEvaluate(
       settled = true;
       clearTimeout(timeoutId);
       child.off('exit', handleExit);
-      Debugger.removeListener('paused', handlePaused);
+      child.off('close', handleClose);
+      emitter.removeListener('disconnect', handleDisconnect);
+      if (removePausedListener) {
+        removePausedListener();
+        removePausedListener = null;
+      }
+      emitter.removeListener('Runtime.executionContextDestroyed', handleExecutionContextDestroyed);
       resolve(result);
     };
 
@@ -124,19 +157,54 @@ function waitForBreakpointAndEvaluate(
       settle({ error: PROCESS_EXIT_ERROR });
     };
 
+    const handleExecutionContextDestroyed = () => {
+      if (!hasResumed) {
+        executionContextDestroyedBeforeResume = true;
+        return;
+      }
+      settle({ error: PROCESS_EXIT_ERROR });
+    };
+
     const timeoutId = setTimeout(() => {
       settle({ error: `Timeout waiting for breakpoint after ${args.timeout}ms` });
     }, args.timeout);
 
-    const handlePaused = async (event: { callFrames: Array<{ callFrameId: string }> }) => {
+    const handlePaused = async (
+      event: { callFrames: Array<{ callFrameId: string; url?: string }> ; hitBreakpoints?: string[] },
+    ) => {
       try {
-        const callFrameId = event.callFrames[0]?.callFrameId;
+        if (breakpointId && !event.hitBreakpoints?.includes(breakpointId)) {
+          await Debugger.resume();
+          return;
+        }
+
+        const topFrame = event.callFrames[0] as {
+          callFrameId: string;
+          url?: string;
+          location?: { scriptId: string; lineNumber: number; columnNumber: number };
+        } | undefined;
+
+        const frameUrl = topFrame?.url;
+        const location = topFrame?.location;
+
+        if (frameUrl && frameUrl !== targetUrl) {
+          await Debugger.resume();
+          return;
+        }
+
+        if (location && location.lineNumber !== targetLineNumber) {
+          await Debugger.resume();
+          return;
+        }
+
+        const callFrameId = topFrame?.callFrameId;
         if (!callFrameId) {
           settle({ error: PROCESS_EXIT_ERROR });
           return;
         }
 
-        Debugger.removeListener('paused', handlePaused);
+        removePausedListener?.();
+        removePausedListener = null;
 
         const evaluation = await evaluateExpression(Debugger, callFrameId, args.expression);
         settle({ result: evaluation });
@@ -146,18 +214,32 @@ function waitForBreakpointAndEvaluate(
       }
     };
 
-    Debugger.on('paused', handlePaused);
+    removePausedListener = Debugger.on('paused', handlePaused);
     child.on('exit', handleExit);
+    child.on('close', handleClose);
+    emitter.on('disconnect', handleDisconnect);
+    emitter.on('Runtime.executionContextDestroyed', handleExecutionContextDestroyed);
 
     if (child.exitCode !== null || child.signalCode !== null) {
       settle({ error: PROCESS_EXIT_ERROR });
       return;
     }
 
-    Runtime.runIfWaitingForDebugger().catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      settle({ error: message });
-    });
+    Runtime.runIfWaitingForDebugger()
+      .then(() => {
+        hasResumed = true;
+        if (executionContextDestroyedBeforeResume) {
+          settle({ error: PROCESS_EXIT_ERROR });
+          return;
+        }
+        if (child.exitCode !== null || child.signalCode !== null) {
+          settle({ error: PROCESS_EXIT_ERROR });
+        }
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        settle({ error: message });
+      });
   });
 }
 
@@ -221,6 +303,7 @@ async function evaluateExpression(
 }
 
 async function cleanup(child: ChildProcess, client?: Client) {
+  console.error('cleanup invoked', child.exitCode, child.signalCode);
   if (!child.killed) {
     child.kill('SIGKILL');
   }

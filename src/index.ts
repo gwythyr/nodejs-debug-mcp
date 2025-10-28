@@ -89,7 +89,7 @@ async function handleMessage(raw: string) {
 
       try {
         const result = await debugScript(args);
-        sendResponse(message.id ?? null, { result });
+        sendResponse(message.id ?? null, result);
       } catch (error) {
         const messageText = error instanceof Error ? error.message : String(error);
         sendResponse(message.id ?? null, { error: messageText });
@@ -131,7 +131,7 @@ function extractArguments(params?: Record<string, unknown>): DebugScriptArgument
   };
 }
 
-function sendResponse(id: JsonRpcId, result: Record<string, unknown>) {
+function sendResponse(id: JsonRpcId, result: unknown) {
   const payload = JSON.stringify({
     jsonrpc: '2.0',
     id,
