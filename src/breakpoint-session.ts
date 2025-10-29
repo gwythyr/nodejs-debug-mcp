@@ -17,6 +17,8 @@ export function createContent(message?: string): ToolContent[] {
   return [{ type: 'text', text: message }];
 }
 
+type SessionState = 'waiting-for-runtime' | 'runtime-ready' | 'completed' | 'errored';
+
 interface SessionOptions {
   breakpointId: string;
   targetUrl: string;
@@ -32,116 +34,214 @@ type DebuggerPausedEvent = {
   hitBreakpoints?: string[];
 };
 
-function successResponse(evaluations: EvaluationResult[]): DebugScriptResponse {
-  return {
-    content: createContent(),
-    structuredContent: { results: evaluations },
-  };
-}
+export class BreakpointEvaluationSession {
+  private readonly Debugger: Client['Debugger'];
+  private readonly Runtime: Client['Runtime'];
+  private readonly child: ChildProcess;
+  private readonly client: Client;
+  private readonly args: DebugScriptArguments;
+  private readonly options: SessionOptions;
 
-function processExitResponse(): DebugScriptResponse {
-  return {
-    content: createContent(PROCESS_EXIT_ERROR),
-    structuredContent: { error: PROCESS_EXIT_ERROR },
-    isError: true,
-  };
-}
+  private state: SessionState = 'waiting-for-runtime';
+  private readonly evaluations: EvaluationResult[] = [];
+  private timeoutId: NodeJS.Timeout | null = null;
+  private resolvePromise: ((value: DebugScriptResponse) => void) | null = null;
+  private listenersAttached = false;
+  private removePausedListener: (() => void) | null = null;
 
-function errorResponse(message: string): DebugScriptResponse {
-  return {
-    content: createContent(message),
-    structuredContent: { error: message },
-    isError: true,
-  };
-}
+  constructor(args: DebugScriptArguments, child: ChildProcess, client: Client, options: SessionOptions) {
+    this.child = child;
+    this.args = args;
+    this.options = options;
+    this.client = client;
+    this.Debugger = client.Debugger;
+    this.Runtime = client.Runtime;
+  }
 
-export function startBreakpointEvaluationSession(
-  args: DebugScriptArguments,
-  child: ChildProcess,
-  client: Client,
-  options: SessionOptions,
-): Promise<DebugScriptResponse> {
-  const { Debugger, Runtime } = client;
-  const evaluations: EvaluationResult[] = [];
-  let resolved = false;
-  let runtimeReady = false;
-  let timeoutId: NodeJS.Timeout | null = null;
-  let resolveResponse: (value: DebugScriptResponse) => void = () => {};
+  start(): Promise<DebugScriptResponse> {
+    return new Promise<DebugScriptResponse>((resolve) => {
+      this.resolvePromise = resolve;
+      this.attachListeners();
+      this.startTimeout();
 
-  const cleanupCallbacks: Array<() => void> = [];
-
-  const clearTimeoutIfNeeded = () => {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-      timeoutId = null;
-    }
-  };
-
-  const cleanupListeners = () => {
-    while (cleanupCallbacks.length > 0) {
-      const cleanup = cleanupCallbacks.pop();
-      try {
-        cleanup?.();
-      } catch {
-        // Listener removal errors should not surface to consumers.
+      if (this.childExited()) {
+        this.settleWithProcessExitError();
+        return;
       }
+
+      void this.Runtime.runIfWaitingForDebugger()
+        .then(this.handleRuntimeReady)
+        .catch(this.handleRuntimeError);
+    });
+  }
+
+  private attachListeners(): void {
+    if (this.listenersAttached) {
+      return;
+    }
+
+    this.removePausedListener = this.Debugger.on('paused', this.handlePaused);
+    this.child.on('exit', this.handleProcessTermination);
+    this.child.on('close', this.handleProcessTermination);
+    this.client.on('disconnect', this.handleProcessTermination);
+    this.client.on('Runtime.executionContextDestroyed', this.handleExecutionContextDestroyed);
+
+    this.listenersAttached = true;
+  }
+
+  private detachListeners(): void {
+    if (!this.listenersAttached) {
+      return;
+    }
+
+    this.child.off('exit', this.handleProcessTermination);
+    this.child.off('close', this.handleProcessTermination);
+    this.client.removeListener('disconnect', this.handleProcessTermination);
+    this.client.removeListener('Runtime.executionContextDestroyed', this.handleExecutionContextDestroyed);
+
+    if (this.removePausedListener) {
+      this.removePausedListener();
+      this.removePausedListener = null;
+    }
+
+    this.listenersAttached = false;
+  }
+
+  private startTimeout(): void {
+    this.clearTimeout();
+    this.timeoutId = setTimeout(() => {
+      this.settleWithError(`Timeout waiting for breakpoint after ${this.args.timeout}ms`);
+    }, this.args.timeout);
+  }
+
+  private clearTimeout(): void {
+    if (this.timeoutId) {
+      clearTimeout(this.timeoutId);
+      this.timeoutId = null;
+    }
+  }
+
+  private childExited(): boolean {
+    return this.child.exitCode !== null || this.child.signalCode !== null;
+  }
+
+  private isSettled(): boolean {
+    return this.state === 'completed' || this.state === 'errored';
+  }
+
+  private recordEvaluation(evaluation: EvaluationResult): void {
+    if (!this.isSettled()) {
+      this.evaluations.push(evaluation);
+    }
+  }
+
+  private hasEvaluations(): boolean {
+    return this.evaluations.length > 0;
+  }
+
+  private finishOnProcessTermination(): void {
+    if (this.isSettled()) {
+      return;
+    }
+
+    if (!this.hasEvaluations()) {
+      this.settleWithProcessExitError();
+      return;
+    }
+
+    this.settle(
+      {
+        content: createContent(),
+        structuredContent: { results: this.evaluations },
+      },
+      'completed',
+    );
+  }
+
+  private settleWithProcessExitError(): void {
+    this.settle(
+      {
+        content: createContent(PROCESS_EXIT_ERROR),
+        structuredContent: { error: PROCESS_EXIT_ERROR },
+        isError: true,
+      },
+      'errored',
+    );
+  }
+
+  private settleWithError(message: string): void {
+    this.settle(
+      {
+        content: createContent(message),
+        structuredContent: { error: message },
+        isError: true,
+      },
+      'errored',
+    );
+  }
+
+  private settle(result: DebugScriptResponse, nextState: Extract<SessionState, 'completed' | 'errored'>): void {
+    if (this.isSettled()) {
+      return;
+    }
+
+    this.state = nextState;
+    this.clearTimeout();
+    this.detachListeners();
+
+    const resolve = this.resolvePromise;
+    this.resolvePromise = null;
+    if (resolve) {
+      resolve(result);
+    }
+  }
+
+  private readonly handleProcessTermination = () => {
+    this.finishOnProcessTermination();
+  };
+
+  private readonly handleExecutionContextDestroyed = () => {
+    if (this.isSettled()) {
+      return;
+    }
+
+    if (this.state === 'waiting-for-runtime') {
+      this.settleWithProcessExitError();
+      return;
+    }
+
+    this.finishOnProcessTermination();
+  };
+
+  private readonly handleRuntimeReady = () => {
+    if (this.isSettled()) {
+      return;
+    }
+
+    if (this.state === 'waiting-for-runtime') {
+      this.state = 'runtime-ready';
+    }
+
+    if (this.childExited()) {
+      this.settleWithProcessExitError();
     }
   };
 
-  const settle = (response: DebugScriptResponse) => {
-    if (resolved) {
+  private readonly handleRuntimeError = (error: unknown) => {
+    if (this.isSettled()) {
       return;
     }
-
-    resolved = true;
-    clearTimeoutIfNeeded();
-    cleanupListeners();
-    resolveResponse(response);
+    const message = error instanceof Error ? error.message : String(error);
+    this.settleWithError(message);
   };
 
-  const settleWithProcessExitError = () => settle(processExitResponse());
-  const settleWithError = (message: string) => settle(errorResponse(message));
-  const settleWithSuccess = () => settle(successResponse(evaluations));
-
-  const finishOnProcessTermination = () => {
-    if (resolved) {
+  private readonly handlePaused = async (event: DebuggerPausedEvent) => {
+    if (this.isSettled()) {
       return;
     }
 
-    if (evaluations.length === 0) {
-      settleWithProcessExitError();
-      return;
-    }
-
-    settleWithSuccess();
-  };
-
-  const childExited = () => child.exitCode !== null || child.signalCode !== null;
-
-  const onProcessTermination = () => {
-    finishOnProcessTermination();
-  };
-
-  const onExecutionContextDestroyed = () => {
-    if (resolved) {
-      return;
-    }
-
-    if (!runtimeReady) {
-      settleWithProcessExitError();
-      return;
-    }
-
-    finishOnProcessTermination();
-  };
-
-  const onPaused = async (event: DebuggerPausedEvent) => {
-    if (resolved) {
-      return;
-    }
-
-    if (options.breakpointId && !event.hitBreakpoints?.includes(options.breakpointId)) {
-      await Debugger.resume();
+    if (this.options.breakpointId && !event.hitBreakpoints?.includes(this.options.breakpointId)) {
+      await this.Debugger.resume();
       return;
     }
 
@@ -149,111 +249,46 @@ export function startBreakpointEvaluationSession(
     const frameUrl = topFrame?.url;
     const location = topFrame?.location;
 
-    if (frameUrl && frameUrl !== options.targetUrl) {
-      await Debugger.resume();
+    if (frameUrl && frameUrl !== this.options.targetUrl) {
+      await this.Debugger.resume();
       return;
     }
 
-    if (location && location.lineNumber !== options.targetLineNumber) {
-      await Debugger.resume();
+    if (location && location.lineNumber !== this.options.targetLineNumber) {
+      await this.Debugger.resume();
       return;
     }
 
     const callFrameId = topFrame?.callFrameId;
     if (!callFrameId) {
-      settleWithProcessExitError();
+      this.settleWithProcessExitError();
       return;
     }
 
     try {
-      const evaluation = await evaluateExpression(Debugger, callFrameId, args.expression);
-      if (!resolved) {
-        evaluations.push(evaluation);
-      }
+      const evaluation = await evaluateExpression(this.Debugger, callFrameId, this.args.expression);
+      this.recordEvaluation(evaluation);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      settleWithError(message);
+      this.settleWithError(message);
       return;
     }
 
-    if (resolved) {
+    if (this.isSettled()) {
       return;
     }
 
     try {
-      await Debugger.resume();
+      await this.Debugger.resume();
     } catch (resumeError) {
-      if (evaluations.length > 0) {
-        finishOnProcessTermination();
+      if (this.hasEvaluations()) {
+        this.finishOnProcessTermination();
         return;
       }
-
       const message = resumeError instanceof Error ? resumeError.message : String(resumeError);
-      settleWithError(message);
+      this.settleWithError(message);
     }
   };
-
-  const attachListeners = () => {
-    const removePausedListener = Debugger.on('paused', onPaused);
-    cleanupCallbacks.push(() => {
-      if (typeof removePausedListener === 'function') {
-        removePausedListener();
-      }
-    });
-
-    child.on('exit', onProcessTermination);
-    cleanupCallbacks.push(() => child.off('exit', onProcessTermination));
-
-    child.on('close', onProcessTermination);
-    cleanupCallbacks.push(() => child.off('close', onProcessTermination));
-
-    client.on('disconnect', onProcessTermination);
-    cleanupCallbacks.push(() => client.removeListener('disconnect', onProcessTermination));
-
-    client.on('Runtime.executionContextDestroyed', onExecutionContextDestroyed);
-    cleanupCallbacks.push(() =>
-      client.removeListener('Runtime.executionContextDestroyed', onExecutionContextDestroyed),
-    );
-  };
-
-  const startTimeout = () => {
-    clearTimeoutIfNeeded();
-    timeoutId = setTimeout(() => {
-      settleWithError(`Timeout waiting for breakpoint after ${args.timeout}ms`);
-    }, args.timeout);
-  };
-
-  return new Promise<DebugScriptResponse>((resolve) => {
-    resolveResponse = resolve;
-    startTimeout();
-    attachListeners();
-
-    if (childExited()) {
-      settleWithProcessExitError();
-      return;
-    }
-
-    void Runtime.runIfWaitingForDebugger()
-      .then(() => {
-        if (resolved) {
-          return;
-        }
-
-        runtimeReady = true;
-
-        if (childExited()) {
-          settleWithProcessExitError();
-        }
-      })
-      .catch((error) => {
-        if (resolved) {
-          return;
-        }
-
-        const message = error instanceof Error ? error.message : String(error);
-        settleWithError(message);
-      });
-  });
 }
 
 async function evaluateExpression(
@@ -330,3 +365,4 @@ async function evaluateExpression(
 
   return { type, value };
 }
+
