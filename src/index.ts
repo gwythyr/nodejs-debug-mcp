@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { debugScript } from './debug-tool.js';
 import type { DebugScriptArguments, DebugScriptResponse, ToolContent } from './types.js';
 
@@ -38,7 +39,7 @@ const TOOL_INFO = {
 };
 
 const SERVER_INFO = {
-  name: 'unit-debug-mcp',
+  name: 'nodejs-debug-mcp',
   version: '0.1.0',
 };
 

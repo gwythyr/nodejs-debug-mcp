@@ -154,7 +154,7 @@ test('debug-script evaluates expression at breakpoint', async (t) => {
   const response = await server.callDebug({
     command: `node --inspect-brk=${port} ${JSON.stringify(script)}`,
     breakpoint: { file: script, line: 4 },
-    expression: 'result.answer',
+    expression: 'globalThis.__debugResult.answer',
     timeout: 5000,
   });
 

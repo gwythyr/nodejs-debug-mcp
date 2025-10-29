@@ -332,30 +332,6 @@ async function evaluateExpression(
   callFrameId: string,
   expression: string,
 ): Promise<{ type: string; value: unknown }> {
-  const wrappedExpression = `JSON.stringify(${expression})`;
-
-  const stringifyResult = await Debugger.evaluateOnCallFrame({
-    callFrameId,
-    expression: wrappedExpression,
-    returnByValue: true,
-    silent: true,
-  });
-
-  let value: unknown = undefined;
-
-  if (!stringifyResult.exceptionDetails && stringifyResult.result.value !== undefined) {
-    const serialized = stringifyResult.result.value;
-    if (typeof serialized === 'string') {
-      try {
-        value = JSON.parse(serialized);
-      } catch {
-        value = serialized;
-      }
-    } else {
-      value = serialized;
-    }
-  }
-
   const rawResult = await Debugger.evaluateOnCallFrame({
     callFrameId,
     expression,
@@ -363,24 +339,64 @@ async function evaluateExpression(
     silent: true,
   });
 
-  let type = rawResult.result.type ?? typeof value;
+  let type = rawResult.result.type ?? 'undefined';
+  let value: unknown = rawResult.result.value;
+
+  const hasObjectId = rawResult.result.objectId !== undefined;
 
   if (!rawResult.exceptionDetails) {
     if (rawResult.result.subtype === 'null') {
       type = 'null';
+      value ??= null;
     } else if (rawResult.result.subtype === 'array') {
       type = 'array';
     }
 
-    if (value === undefined) {
-      if (rawResult.result.value !== undefined) {
-        value = rawResult.result.value;
-      } else if (rawResult.result.description !== undefined) {
-        value = rawResult.result.description;
+    if (value === undefined && rawResult.result.description !== undefined && !hasObjectId) {
+      value = rawResult.result.description;
+    }
+  }
+
+  const needsSerialization =
+    rawResult.exceptionDetails !== undefined ||
+    hasObjectId ||
+    value === undefined ||
+    type === 'object';
+
+  if (needsSerialization) {
+    const wrappedExpression = `(function () { try { return JSON.stringify(${expression}); } catch (error) { return undefined; } })()`;
+
+    const stringifyResult = await Debugger.evaluateOnCallFrame({
+      callFrameId,
+      expression: wrappedExpression,
+      returnByValue: true,
+      silent: true,
+    });
+
+    if (!stringifyResult.exceptionDetails && stringifyResult.result.value !== undefined) {
+      const serialized = stringifyResult.result.value;
+      if (typeof serialized === 'string') {
+        try {
+          value = JSON.parse(serialized);
+        } catch {
+          value = serialized;
+        }
+      } else {
+        value = serialized;
       }
     }
-  } else {
-    type = typeof value;
+  }
+
+  if (rawResult.exceptionDetails) {
+    type = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+  } else if (value !== undefined) {
+    if (Array.isArray(value)) {
+      type = 'array';
+    } else if (value === null) {
+      type = 'null';
+    } else if (typeof value !== 'object') {
+      type = typeof value;
+    }
   }
 
   return { type, value };

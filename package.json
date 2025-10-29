@@ -1,18 +1,50 @@
 {
-  "name": "unit-debug-mcp",
+  "name": "nodejs-debug-mcp",
   "version": "0.1.0",
+  "description": "Model Context Protocol server exposing a debug-script tool for Node.js inspector sessions.",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "nodejs-debug-mcp": "dist/index.js"
+  },
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test test/e2e.test.js"
+    "test": "npm run build && node --test test/e2e.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "debugger",
+    "nodejs",
+    "chrome-devtools",
+    "inspector",
+    "tooling"
+  ],
+  "author": "Victor Shymko",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gwythyr/nodejs-debug-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gwythyr/nodejs-debug-mcp/issues"
+  },
+  "homepage": "https://github.com/gwythyr/nodejs-debug-mcp#readme",
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "latest",
-    "chrome-remote-interface": "latest"
+    "@modelcontextprotocol/sdk": "^1.20.2",
+    "chrome-remote-interface": "^0.33.3"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "typescript": "latest"
+    "@types/node": "^24.9.1",
+    "typescript": "^5.9.3"
   }
 }
