@@ -10,15 +10,34 @@ export interface DebugScriptArguments {
   timeout: number;
 }
 
+export interface EvaluationResult {
+  type: string;
+  value: unknown;
+}
+
+export interface ToolContent {
+  type: 'text';
+  text: string;
+}
+
+export interface DebugScriptStructuredSuccess {
+  results: EvaluationResult[];
+}
+
+export interface DebugScriptStructuredError {
+  error: string;
+}
+
 export interface DebugScriptSuccess {
-  result: {
-    type: string;
-    value: unknown;
-  };
+  content: ToolContent[];
+  structuredContent: DebugScriptStructuredSuccess;
+  isError?: false;
 }
 
 export interface DebugScriptError {
-  error: string;
+  content: ToolContent[];
+  structuredContent: DebugScriptStructuredError;
+  isError: true;
 }
 
 export type DebugScriptResponse = DebugScriptSuccess | DebugScriptError;

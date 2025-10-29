@@ -1,5 +1,6 @@
+#!/usr/bin/env node
 import { debugScript } from './debug-tool.js';
-import type { DebugScriptArguments, DebugScriptResponse } from './types.js';
+import type { DebugScriptArguments, DebugScriptResponse, ToolContent } from './types.js';
 
 type JsonRpcId = string | number | null;
 
@@ -29,17 +30,42 @@ const TOOL_INPUT_SCHEMA = {
 };
 
 const TOOL_DESCRIPTION =
-  'Execute a Node.js command in debug mode, pause at a breakpoint, evaluate an expression, and return the value.';
+  'Execute a single-threaded Node.js command (with --inspect-brk) in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.';
 
 const TOOL_INFO = {
   name: 'debug-script',
   description: TOOL_DESCRIPTION,
-  input_schema: TOOL_INPUT_SCHEMA,
+  inputSchema: TOOL_INPUT_SCHEMA,
 };
+
+const SERVER_INFO = {
+  name: 'nodejs-debug-mcp',
+  version: '0.1.0',
+};
+
+const SERVER_CAPABILITIES = {
+  tools: {},
+};
+
+const SUPPORTED_PROTOCOL_VERSIONS = new Set([
+  '2025-06-18',
+  '2025-03-26',
+  '2024-11-05',
+  '2024-10-07',
+]);
+
+const PROTOCOL_VERSION = '2025-06-18';
 
 process.stdin.setEncoding('utf8');
 
 let buffer = '';
+
+function createContent(message?: string): ToolContent[] {
+  if (!message) {
+    return [];
+  }
+  return [{ type: 'text', text: message }];
+}
 
 process.stdin.on('data', (chunk: string) => {
   buffer += chunk;
@@ -76,6 +102,25 @@ async function handleMessage(raw: string) {
   }
 
   switch (message.method) {
+    case 'initialize': {
+      if (!validateInitializeParams(message.params)) {
+        sendError(message.id ?? null, -32602, 'Invalid params for initialize');
+        return;
+      }
+
+      const protocolVersion = negotiateProtocolVersion(message.params.protocolVersion);
+
+      sendResponse(message.id ?? null, {
+        protocolVersion,
+        capabilities: SERVER_CAPABILITIES,
+        serverInfo: SERVER_INFO,
+      });
+      break;
+    }
+    case 'ping': {
+      sendResponse(message.id ?? null, {});
+      break;
+    }
     case 'tools/list': {
       sendResponse(message.id ?? null, { tools: [TOOL_INFO] });
       break;
@@ -92,14 +137,34 @@ async function handleMessage(raw: string) {
         sendResponse(message.id ?? null, result);
       } catch (error) {
         const messageText = error instanceof Error ? error.message : String(error);
-        sendResponse(message.id ?? null, { error: messageText });
+        sendResponse(message.id ?? null, {
+          content: createContent(messageText),
+          structuredContent: { error: messageText },
+          isError: true,
+        });
       }
       break;
     }
     default: {
-      sendError(message.id ?? null, -32601, `Method not found: ${message.method}`);
+      if (message.id !== undefined) {
+        sendError(message.id, -32601, `Method not found: ${message.method}`);
+      }
     }
   }
+}
+
+function validateInitializeParams(params?: Record<string, unknown>): params is {
+  protocolVersion: string;
+} {
+  if (!params || typeof params !== 'object') {
+    return false;
+  }
+
+  return typeof params.protocolVersion === 'string';
+}
+
+function negotiateProtocolVersion(requested: string): string {
+  return SUPPORTED_PROTOCOL_VERSIONS.has(requested) ? requested : PROTOCOL_VERSION;
 }
 
 function extractArguments(params?: Record<string, unknown>): DebugScriptArguments | null {

@@ -1,9 +1,10 @@
 const result = { answer: 42 };
+globalThis.__debugResult = result;
 
 setTimeout(() => {
   const message = 'ready';
   globalThis.__debugMessage = message;
-  console.log(result, message);
+  void 0;
 }, 10);
 
-setTimeout(() => {}, 5000);
+setTimeout(() => {}, 50);
