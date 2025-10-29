@@ -34,16 +34,11 @@ type DebuggerPausedEvent = {
   hitBreakpoints?: string[];
 };
 
-type SessionEmitter = {
-  on(event: string, listener: (...args: unknown[]) => void): void;
-  removeListener(event: string, listener: (...args: unknown[]) => void): void;
-};
-
 export class BreakpointEvaluationSession {
   private readonly Debugger: Client['Debugger'];
   private readonly Runtime: Client['Runtime'];
   private readonly child: ChildProcess;
-  private readonly emitter: SessionEmitter;
+  private readonly client: Client;
   private readonly args: DebugScriptArguments;
   private readonly options: SessionOptions;
 
@@ -58,9 +53,9 @@ export class BreakpointEvaluationSession {
     this.child = child;
     this.args = args;
     this.options = options;
+    this.client = client;
     this.Debugger = client.Debugger;
     this.Runtime = client.Runtime;
-    this.emitter = client as unknown as SessionEmitter;
   }
 
   start(): Promise<DebugScriptResponse> {
@@ -88,8 +83,8 @@ export class BreakpointEvaluationSession {
     this.removePausedListener = this.Debugger.on('paused', this.handlePaused);
     this.child.on('exit', this.handleProcessTermination);
     this.child.on('close', this.handleProcessTermination);
-    this.emitter.on('disconnect', this.handleProcessTermination);
-    this.emitter.on('Runtime.executionContextDestroyed', this.handleExecutionContextDestroyed);
+    this.client.on('disconnect', this.handleProcessTermination);
+    this.client.on('Runtime.executionContextDestroyed', this.handleExecutionContextDestroyed);
 
     this.listenersAttached = true;
   }
@@ -101,8 +96,8 @@ export class BreakpointEvaluationSession {
 
     this.child.off('exit', this.handleProcessTermination);
     this.child.off('close', this.handleProcessTermination);
-    this.emitter.removeListener('disconnect', this.handleProcessTermination);
-    this.emitter.removeListener('Runtime.executionContextDestroyed', this.handleExecutionContextDestroyed);
+    this.client.removeListener('disconnect', this.handleProcessTermination);
+    this.client.removeListener('Runtime.executionContextDestroyed', this.handleExecutionContextDestroyed);
 
     if (this.removePausedListener) {
       this.removePausedListener();
