@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import CDP, { type Client } from 'chrome-remote-interface';
 
-import { BreakpointEvaluationSession, PROCESS_EXIT_ERROR, createContent } from './breakpoint-session.js';
+import { PROCESS_EXIT_ERROR, createContent, startBreakpointEvaluationSession } from './breakpoint-session.js';
 import type { DebugScriptArguments, DebugScriptResponse } from './types.js';
 
 const PORT_REGEX = /--inspect-brk=(\d+)/;
@@ -121,12 +121,11 @@ function waitForBreakpointAndEvaluate(
   targetUrl: string,
   targetLineNumber: number,
 ): Promise<DebugScriptResponse> {
-  const session = new BreakpointEvaluationSession(args, child, client, {
+  return startBreakpointEvaluationSession(args, child, client, {
     breakpointId,
     targetUrl,
     targetLineNumber,
   });
-  return session.start();
 }
 
 

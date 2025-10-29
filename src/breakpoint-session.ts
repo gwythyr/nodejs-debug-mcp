@@ -17,8 +17,6 @@ export function createContent(message?: string): ToolContent[] {
   return [{ type: 'text', text: message }];
 }
 
-type SessionState = 'waiting-for-runtime' | 'runtime-ready' | 'completed' | 'errored';
-
 interface SessionOptions {
   breakpointId: string;
   targetUrl: string;
@@ -34,266 +32,116 @@ type DebuggerPausedEvent = {
   hitBreakpoints?: string[];
 };
 
-class SessionResultSerializer {
-  static success(evaluations: EvaluationResult[]): DebugScriptResponse {
-    return {
-      content: createContent(),
-      structuredContent: { results: evaluations },
-    };
-  }
-
-  static processExitError(): DebugScriptResponse {
-    return {
-      content: createContent(PROCESS_EXIT_ERROR),
-      structuredContent: { error: PROCESS_EXIT_ERROR },
-      isError: true,
-    };
-  }
-
-  static error(message: string): DebugScriptResponse {
-    return {
-      content: createContent(message),
-      structuredContent: { error: message },
-      isError: true,
-    };
-  }
+function successResponse(evaluations: EvaluationResult[]): DebugScriptResponse {
+  return {
+    content: createContent(),
+    structuredContent: { results: evaluations },
+  };
 }
 
-class SessionStateMachine {
-  private state: SessionState = 'waiting-for-runtime';
-  private readonly evaluations: EvaluationResult[] = [];
-  private timeoutId: NodeJS.Timeout | null = null;
-  private resolvePromise: ((value: DebugScriptResponse) => void) | null = null;
+function processExitResponse(): DebugScriptResponse {
+  return {
+    content: createContent(PROCESS_EXIT_ERROR),
+    structuredContent: { error: PROCESS_EXIT_ERROR },
+    isError: true,
+  };
+}
 
-  constructor(
-    private readonly args: DebugScriptArguments,
-    private readonly onSettle: () => void,
-  ) {}
+function errorResponse(message: string): DebugScriptResponse {
+  return {
+    content: createContent(message),
+    structuredContent: { error: message },
+    isError: true,
+  };
+}
 
-  begin(resolve: (value: DebugScriptResponse) => void): void {
-    this.resolvePromise = resolve;
-    this.startTimeout();
-  }
+export function startBreakpointEvaluationSession(
+  args: DebugScriptArguments,
+  child: ChildProcess,
+  client: Client,
+  options: SessionOptions,
+): Promise<DebugScriptResponse> {
+  const { Debugger, Runtime } = client;
+  const evaluations: EvaluationResult[] = [];
+  let resolved = false;
+  let runtimeReady = false;
+  let timeoutId: NodeJS.Timeout | null = null;
+  let resolveResponse: (value: DebugScriptResponse) => void = () => {};
 
-  isSettled(): boolean {
-    return this.state === 'completed' || this.state === 'errored';
-  }
+  const cleanupCallbacks: Array<() => void> = [];
 
-  isWaitingForRuntime(): boolean {
-    return this.state === 'waiting-for-runtime';
-  }
-
-  markRuntimeReady(): void {
-    if (this.state === 'waiting-for-runtime') {
-      this.state = 'runtime-ready';
+  const clearTimeoutIfNeeded = () => {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
     }
-  }
+  };
 
-  recordEvaluation(evaluation: EvaluationResult): void {
-    if (!this.isSettled()) {
-      this.evaluations.push(evaluation);
-    }
-  }
-
-  hasEvaluations(): boolean {
-    return this.evaluations.length > 0;
-  }
-
-  finishOnProcessTermination(): void {
-    if (this.isSettled()) {
-      return;
-    }
-
-    if (!this.hasEvaluations()) {
-      this.settleWithProcessExitError();
-      return;
-    }
-
-    this.settle(SessionResultSerializer.success(this.evaluations), 'completed');
-  }
-
-  settleWithProcessExitError(): void {
-    this.settle(SessionResultSerializer.processExitError(), 'errored');
-  }
-
-  settleWithError(message: string): void {
-    this.settle(SessionResultSerializer.error(message), 'errored');
-  }
-
-  private settle(result: DebugScriptResponse, nextState: Extract<SessionState, 'completed' | 'errored'>): void {
-    if (this.isSettled()) {
-      return;
-    }
-
-    this.state = nextState;
-    this.clearTimeout();
-
-    try {
-      this.onSettle();
-    } finally {
-      const resolve = this.resolvePromise;
-      this.resolvePromise = null;
-      if (resolve) {
-        resolve(result);
+  const cleanupListeners = () => {
+    while (cleanupCallbacks.length > 0) {
+      const cleanup = cleanupCallbacks.pop();
+      try {
+        cleanup?.();
+      } catch {
+        // Listener removal errors should not surface to consumers.
       }
     }
-  }
-
-  private startTimeout(): void {
-    this.clearTimeout();
-    this.timeoutId = setTimeout(() => {
-      this.settleWithError(`Timeout waiting for breakpoint after ${this.args.timeout}ms`);
-    }, this.args.timeout);
-  }
-
-  private clearTimeout(): void {
-    if (this.timeoutId) {
-      clearTimeout(this.timeoutId);
-      this.timeoutId = null;
-    }
-  }
-}
-
-class SessionListenerManager {
-  private listenersAttached = false;
-  private removePausedListener: (() => void) | null = null;
-
-  constructor(
-    private readonly child: ChildProcess,
-    private readonly client: Client,
-    private readonly Debugger: Client['Debugger'],
-    private readonly onProcessTermination: () => void,
-    private readonly onExecutionContextDestroyed: () => void,
-    private readonly onPaused: (event: DebuggerPausedEvent) => void | Promise<void>,
-  ) {}
-
-  attach(): void {
-    if (this.listenersAttached) {
-      return;
-    }
-
-    this.removePausedListener = this.Debugger.on('paused', this.onPaused);
-    this.child.on('exit', this.onProcessTermination);
-    this.child.on('close', this.onProcessTermination);
-    this.client.on('disconnect', this.onProcessTermination);
-    this.client.on('Runtime.executionContextDestroyed', this.onExecutionContextDestroyed);
-
-    this.listenersAttached = true;
-  }
-
-  detach(): void {
-    if (!this.listenersAttached) {
-      return;
-    }
-
-    this.child.off('exit', this.onProcessTermination);
-    this.child.off('close', this.onProcessTermination);
-    this.client.removeListener('disconnect', this.onProcessTermination);
-    this.client.removeListener('Runtime.executionContextDestroyed', this.onExecutionContextDestroyed);
-
-    if (this.removePausedListener) {
-      this.removePausedListener();
-      this.removePausedListener = null;
-    }
-
-    this.listenersAttached = false;
-  }
-}
-
-export class BreakpointEvaluationSession {
-  private readonly Debugger: Client['Debugger'];
-  private readonly Runtime: Client['Runtime'];
-  private readonly child: ChildProcess;
-  private readonly client: Client;
-  private readonly args: DebugScriptArguments;
-  private readonly options: SessionOptions;
-  private readonly stateMachine: SessionStateMachine;
-  private readonly listeners: SessionListenerManager;
-
-  constructor(args: DebugScriptArguments, child: ChildProcess, client: Client, options: SessionOptions) {
-    this.child = child;
-    this.args = args;
-    this.options = options;
-    this.client = client;
-    this.Debugger = client.Debugger;
-    this.Runtime = client.Runtime;
-    this.listeners = new SessionListenerManager(
-      this.child,
-      this.client,
-      this.Debugger,
-      this.handleProcessTermination,
-      this.handleExecutionContextDestroyed,
-      this.handlePaused,
-    );
-    this.stateMachine = new SessionStateMachine(this.args, () => {
-      this.listeners.detach();
-    });
-  }
-
-  start(): Promise<DebugScriptResponse> {
-    return new Promise<DebugScriptResponse>((resolve) => {
-      this.stateMachine.begin(resolve);
-      this.listeners.attach();
-
-      if (this.childExited()) {
-        this.stateMachine.settleWithProcessExitError();
-        return;
-      }
-
-      void this.Runtime.runIfWaitingForDebugger()
-        .then(this.handleRuntimeReady)
-        .catch(this.handleRuntimeError);
-    });
-  }
-
-  private childExited(): boolean {
-    return this.child.exitCode !== null || this.child.signalCode !== null;
-  }
-
-  private readonly handleProcessTermination = () => {
-    this.stateMachine.finishOnProcessTermination();
   };
 
-  private readonly handleExecutionContextDestroyed = () => {
-    if (this.stateMachine.isSettled()) {
+  const settle = (response: DebugScriptResponse) => {
+    if (resolved) {
       return;
     }
 
-    if (this.stateMachine.isWaitingForRuntime()) {
-      this.stateMachine.settleWithProcessExitError();
-      return;
-    }
-
-    this.stateMachine.finishOnProcessTermination();
+    resolved = true;
+    clearTimeoutIfNeeded();
+    cleanupListeners();
+    resolveResponse(response);
   };
 
-  private readonly handleRuntimeReady = () => {
-    if (this.stateMachine.isSettled()) {
+  const settleWithProcessExitError = () => settle(processExitResponse());
+  const settleWithError = (message: string) => settle(errorResponse(message));
+  const settleWithSuccess = () => settle(successResponse(evaluations));
+
+  const finishOnProcessTermination = () => {
+    if (resolved) {
       return;
     }
 
-    this.stateMachine.markRuntimeReady();
-
-    if (this.childExited()) {
-      this.stateMachine.settleWithProcessExitError();
+    if (evaluations.length === 0) {
+      settleWithProcessExitError();
+      return;
     }
+
+    settleWithSuccess();
   };
 
-  private readonly handleRuntimeError = (error: unknown) => {
-    if (this.stateMachine.isSettled()) {
-      return;
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    this.stateMachine.settleWithError(message);
+  const childExited = () => child.exitCode !== null || child.signalCode !== null;
+
+  const onProcessTermination = () => {
+    finishOnProcessTermination();
   };
 
-  private readonly handlePaused = async (event: DebuggerPausedEvent) => {
-    if (this.stateMachine.isSettled()) {
+  const onExecutionContextDestroyed = () => {
+    if (resolved) {
       return;
     }
 
-    if (this.options.breakpointId && !event.hitBreakpoints?.includes(this.options.breakpointId)) {
-      await this.Debugger.resume();
+    if (!runtimeReady) {
+      settleWithProcessExitError();
+      return;
+    }
+
+    finishOnProcessTermination();
+  };
+
+  const onPaused = async (event: DebuggerPausedEvent) => {
+    if (resolved) {
+      return;
+    }
+
+    if (options.breakpointId && !event.hitBreakpoints?.includes(options.breakpointId)) {
+      await Debugger.resume();
       return;
     }
 
@@ -301,46 +149,111 @@ export class BreakpointEvaluationSession {
     const frameUrl = topFrame?.url;
     const location = topFrame?.location;
 
-    if (frameUrl && frameUrl !== this.options.targetUrl) {
-      await this.Debugger.resume();
+    if (frameUrl && frameUrl !== options.targetUrl) {
+      await Debugger.resume();
       return;
     }
 
-    if (location && location.lineNumber !== this.options.targetLineNumber) {
-      await this.Debugger.resume();
+    if (location && location.lineNumber !== options.targetLineNumber) {
+      await Debugger.resume();
       return;
     }
 
     const callFrameId = topFrame?.callFrameId;
     if (!callFrameId) {
-      this.stateMachine.settleWithProcessExitError();
+      settleWithProcessExitError();
       return;
     }
 
     try {
-      const evaluation = await evaluateExpression(this.Debugger, callFrameId, this.args.expression);
-      this.stateMachine.recordEvaluation(evaluation);
+      const evaluation = await evaluateExpression(Debugger, callFrameId, args.expression);
+      if (!resolved) {
+        evaluations.push(evaluation);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.stateMachine.settleWithError(message);
+      settleWithError(message);
       return;
     }
 
-    if (this.stateMachine.isSettled()) {
+    if (resolved) {
       return;
     }
 
     try {
-      await this.Debugger.resume();
+      await Debugger.resume();
     } catch (resumeError) {
-      if (this.stateMachine.hasEvaluations()) {
-        this.stateMachine.finishOnProcessTermination();
+      if (evaluations.length > 0) {
+        finishOnProcessTermination();
         return;
       }
+
       const message = resumeError instanceof Error ? resumeError.message : String(resumeError);
-      this.stateMachine.settleWithError(message);
+      settleWithError(message);
     }
   };
+
+  const attachListeners = () => {
+    const removePausedListener = Debugger.on('paused', onPaused);
+    cleanupCallbacks.push(() => {
+      if (typeof removePausedListener === 'function') {
+        removePausedListener();
+      }
+    });
+
+    child.on('exit', onProcessTermination);
+    cleanupCallbacks.push(() => child.off('exit', onProcessTermination));
+
+    child.on('close', onProcessTermination);
+    cleanupCallbacks.push(() => child.off('close', onProcessTermination));
+
+    client.on('disconnect', onProcessTermination);
+    cleanupCallbacks.push(() => client.removeListener('disconnect', onProcessTermination));
+
+    client.on('Runtime.executionContextDestroyed', onExecutionContextDestroyed);
+    cleanupCallbacks.push(() =>
+      client.removeListener('Runtime.executionContextDestroyed', onExecutionContextDestroyed),
+    );
+  };
+
+  const startTimeout = () => {
+    clearTimeoutIfNeeded();
+    timeoutId = setTimeout(() => {
+      settleWithError(`Timeout waiting for breakpoint after ${args.timeout}ms`);
+    }, args.timeout);
+  };
+
+  return new Promise<DebugScriptResponse>((resolve) => {
+    resolveResponse = resolve;
+    startTimeout();
+    attachListeners();
+
+    if (childExited()) {
+      settleWithProcessExitError();
+      return;
+    }
+
+    void Runtime.runIfWaitingForDebugger()
+      .then(() => {
+        if (resolved) {
+          return;
+        }
+
+        runtimeReady = true;
+
+        if (childExited()) {
+          settleWithProcessExitError();
+        }
+      })
+      .catch((error) => {
+        if (resolved) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        settleWithError(message);
+      });
+  });
 }
 
 async function evaluateExpression(
