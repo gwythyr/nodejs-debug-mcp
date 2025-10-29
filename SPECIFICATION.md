@@ -14,10 +14,10 @@ The `debug-script` tool will execute the following sequence of actions upon rece
 
 1. **Launch Process**: Start the target script or process using the provided command, ensuring it is launched in debug mode
 2. **Set Breakpoint**: Set a single breakpoint at the specified file and line number
-3. **Await Break**: Run the process and wait for execution to pause at the breakpoint
-4. **Evaluate Expression**: Once paused, evaluate the provided expression in the current execution context (scope) of the breakpoint
-5. **Terminate Process**: After the expression has been successfully evaluated, immediately terminate the debugged process
-6. **Return Result**: Send the result of the expression evaluation back to the client via stdout
+3. **Run and Monitor**: Resume execution and listen for every pause triggered by the configured breakpoint
+4. **Evaluate Expression**: On each pause, evaluate the provided expression within the current execution context and store the typed result
+5. **Resume Execution**: Resume the target process after each evaluation and continue monitoring until the process exits or the timeout elapses
+6. **Return Results**: Send the collected list of evaluation results back to the client via stdout once execution has completed
 
 ## API Specification
 
@@ -43,7 +43,7 @@ The `debug-script` tool accepts a request with the following four parameters:
 
 #### Parameters:
 
-1. **command** (string, required): The full command-line instruction to execute the target Node.js process. The command MUST include the `--inspect-brk=<port>` flag to enable debugging.
+1. **command** (string, required): The full command-line instruction to execute the target Node.js process. The command MUST include the `--inspect-brk=<port>` flag to enable debugging and MUST launch a single-threaded Node.js execution (no worker threads, clustered processes, or additional inspectors).
    - Example: `node --inspect-brk=9229 ./test.js`
    - The port number will be extracted using regex: `--inspect-brk=(\d+)`
 
@@ -65,26 +65,48 @@ The `debug-script` tool accepts a request with the following four parameters:
 
 ```json
 {
-  "result": {
-    "type": "number",
-    "value": 42
+  "content": [],
+  "structuredContent": {
+    "results": [
+      {
+        "type": "number",
+        "value": 42
+      },
+      {
+        "type": "number",
+        "value": 43
+      }
+    ]
   }
 }
 ```
 
-The `result` object contains:
-- **type** (string): The JavaScript type of the evaluated expression
-- **value** (any): The actual value, parsed from JSON when possible
+- `content` (array): Optional list of MCP content blocks conveying human-readable context. Successful evaluations omit additional text by default.
+- `structuredContent` (object): Structured output defined by the tool schema.
+  - `results` (array): Each evaluation result includes:
+    - **type** (string): JavaScript type of the evaluated expression at the breakpoint hit.
+    - **value** (any): Actual value, parsed from JSON when possible.
 
 #### Error Response
 
 ```json
 {
-  "error": "Process exited before breakpoint was hit"
+  "content": [
+    {
+      "type": "text",
+      "text": "Process exited before breakpoint was hit"
+    }
+  ],
+  "structuredContent": {
+    "error": "Process exited before breakpoint was hit"
+  },
+  "isError": true
 }
 ```
 
-Simple error string indicating what went wrong.
+- `content` provides human-readable context about the failure.
+- `structuredContent.error` holds the machine-readable error message.
+- `isError` (boolean) MUST be set to `true` for tool-level errors surfaced via `structuredContent`.
 
 #### Error Cases
 
@@ -124,21 +146,23 @@ This implementation specifically targets **Node.js** debugging only. The Chrome 
 
 5. **Start Execution**:
    - Call `Runtime.runIfWaitingForDebugger()` to continue from the initial break
+   - Begin a timeout timer that covers the entire debug session
 
 6. **Wait for Events**:
-   - Listen for `Debugger.paused` event (breakpoint hit)
-   - Listen for process exit event
-   - Start timeout timer
+   - Listen for `Debugger.paused` events (breakpoint hits)
+   - Listen for process exit events and inspector disconnects
 
 7. **Evaluate Expression**:
    - Try: `Runtime.evaluate({ expression: "JSON.stringify(${expression})" })`
    - If that fails, fallback to: `Runtime.evaluate({ expression })`
    - Parse the result to extract type and value
+   - Append the typed result to an in-memory array
+   - Call `Debugger.resume()` to continue execution
 
-8. **Cleanup**:
-   - Kill the spawned Node process
+8. **Session Completion**:
+   - Stop when the target process exits or the timeout elapses
    - Close the Inspector connection
-   - Return the result
+   - Return the collected results
 
 ### Expression Evaluation Strategy
 
@@ -260,12 +284,21 @@ The server reads from stdin and writes to stdout, following the MCP protocol.
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "result": {
-      "type": "object",
-      "value": {
-        "name": "John",
-        "age": 30
-      }
+    "content": [],
+    "structuredContent": {
+      "results": [
+        {
+          "type": "object",
+          "value": {
+            "name": "John",
+            "age": 30
+          }
+        },
+        {
+          "type": "string",
+          "value": "done"
+        }
+      ]
     }
   }
 }
@@ -278,7 +311,16 @@ The server reads from stdin and writes to stdout, following the MCP protocol.
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "error": "Timeout waiting for breakpoint after 30000ms"
+    "content": [
+      {
+        "type": "text",
+        "text": "Timeout waiting for breakpoint after 30000ms"
+      }
+    ],
+    "structuredContent": {
+      "error": "Timeout waiting for breakpoint after 30000ms"
+    },
+    "isError": true
   }
 }
 ```
@@ -295,7 +337,7 @@ The debug port is extracted from the command string. If no port is specified or 
 
 ### Process Lifecycle
 
-The spawned Node process is forcefully terminated (`SIGKILL`) after expression evaluation, regardless of whether it has finished executing. This ensures clean resource management.
+The spawned Node process is allowed to exit naturally. The implementation only sends a termination signal if cleanup occurs while the process is still running.
 
 ### Environment Inheritance
 
@@ -309,7 +351,7 @@ The implementation is considered complete when:
 2. The `debug-script` tool is registered and callable
 3. Node.js processes can be spawned with debug flags
 4. Breakpoints can be set and hit successfully
-5. Expressions are evaluated and results returned with type information
-6. Processes are cleanly terminated after evaluation
+5. Expressions are evaluated on each breakpoint hit and returned with type information in order
+6. Processes are allowed to finish execution unless cleanup requires termination
 7. Timeout and process-exit errors are detected and reported
 8. The codebase is minimal and focused on the happy path

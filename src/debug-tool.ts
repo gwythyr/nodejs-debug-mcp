@@ -3,12 +3,24 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import CDP, { type Client } from 'chrome-remote-interface';
 
-import type { DebugScriptArguments, DebugScriptResponse } from './types.js';
+import type {
+  DebugScriptArguments,
+  DebugScriptResponse,
+  EvaluationResult,
+  ToolContent,
+} from './types.js';
 
 const PORT_REGEX = /--inspect-brk=(\d+)/;
 const CONNECT_RETRY_DELAY_MS = 100;
 const MAX_CONNECT_WAIT_MS = 5000;
 const PROCESS_EXIT_ERROR = 'Process exited before breakpoint was hit';
+
+function createContent(message?: string): ToolContent[] {
+  if (!message) {
+    return [];
+  }
+  return [{ type: 'text', text: message }];
+}
 
 export async function debugScript(args: DebugScriptArguments): Promise<DebugScriptResponse> {
   const port = extractPort(args.command);
@@ -32,7 +44,11 @@ export async function debugScript(args: DebugScriptArguments): Promise<DebugScri
     client = await connectToInspector(port, args.timeout, () => processExited);
   } catch (error) {
     if (processExited || (error instanceof Error && error.message === PROCESS_EXIT_ERROR)) {
-      return { error: PROCESS_EXIT_ERROR };
+      return {
+        content: createContent(PROCESS_EXIT_ERROR),
+        structuredContent: { error: PROCESS_EXIT_ERROR },
+        isError: true,
+      };
     }
     throw error;
   }
@@ -125,15 +141,17 @@ function waitForBreakpointAndEvaluate(
 
   return new Promise<DebugScriptResponse>((resolve) => {
     let settled = false;
+    const evaluations: EvaluationResult[] = [];
 
     let removePausedListener: (() => void) | null = null;
     let hasResumed = false;
     let executionContextDestroyedBeforeResume = false;
+    let contextDestroyedAfterResume = false;
     const handleDisconnect = () => {
-      settle({ error: PROCESS_EXIT_ERROR });
+      finishSession();
     };
     const handleClose = () => {
-      settle({ error: PROCESS_EXIT_ERROR });
+      finishSession();
     };
 
     const settle = (result: DebugScriptResponse) => {
@@ -153,8 +171,26 @@ function waitForBreakpointAndEvaluate(
       resolve(result);
     };
 
+    const finishSession = () => {
+      if (settled) {
+        return;
+      }
+      if (evaluations.length === 0) {
+        settle({
+          content: createContent(PROCESS_EXIT_ERROR),
+          structuredContent: { error: PROCESS_EXIT_ERROR },
+          isError: true,
+        });
+      } else {
+        settle({
+          content: createContent(),
+          structuredContent: { results: evaluations },
+        });
+      }
+    };
+
     const handleExit = () => {
-      settle({ error: PROCESS_EXIT_ERROR });
+      finishSession();
     };
 
     const handleExecutionContextDestroyed = () => {
@@ -162,11 +198,16 @@ function waitForBreakpointAndEvaluate(
         executionContextDestroyedBeforeResume = true;
         return;
       }
-      settle({ error: PROCESS_EXIT_ERROR });
+      contextDestroyedAfterResume = true;
+      finishSession();
     };
 
     const timeoutId = setTimeout(() => {
-      settle({ error: `Timeout waiting for breakpoint after ${args.timeout}ms` });
+      settle({
+        content: createContent(`Timeout waiting for breakpoint after ${args.timeout}ms`),
+        structuredContent: { error: `Timeout waiting for breakpoint after ${args.timeout}ms` },
+        isError: true,
+      });
     }, args.timeout);
 
     const handlePaused = async (
@@ -199,18 +240,43 @@ function waitForBreakpointAndEvaluate(
 
         const callFrameId = topFrame?.callFrameId;
         if (!callFrameId) {
-          settle({ error: PROCESS_EXIT_ERROR });
+          settle({
+            content: createContent(PROCESS_EXIT_ERROR),
+            structuredContent: { error: PROCESS_EXIT_ERROR },
+            isError: true,
+          });
           return;
         }
 
-        removePausedListener?.();
-        removePausedListener = null;
-
         const evaluation = await evaluateExpression(Debugger, callFrameId, args.expression);
-        settle({ result: evaluation });
+        evaluations.push(evaluation);
+
+        if (settled) {
+          return;
+        }
+
+        try {
+          await Debugger.resume();
+        } catch (resumeError) {
+          if (evaluations.length > 0) {
+            finishSession();
+            return;
+          }
+          const message =
+            resumeError instanceof Error ? resumeError.message : String(resumeError);
+          settle({
+            content: createContent(message),
+            structuredContent: { error: message },
+            isError: true,
+          });
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        settle({ error: message });
+        settle({
+          content: createContent(message),
+          structuredContent: { error: message },
+          isError: true,
+        });
       }
     };
 
@@ -221,7 +287,11 @@ function waitForBreakpointAndEvaluate(
     emitter.on('Runtime.executionContextDestroyed', handleExecutionContextDestroyed);
 
     if (child.exitCode !== null || child.signalCode !== null) {
-      settle({ error: PROCESS_EXIT_ERROR });
+      settle({
+        content: createContent(PROCESS_EXIT_ERROR),
+        structuredContent: { error: PROCESS_EXIT_ERROR },
+        isError: true,
+      });
       return;
     }
 
@@ -229,16 +299,30 @@ function waitForBreakpointAndEvaluate(
       .then(() => {
         hasResumed = true;
         if (executionContextDestroyedBeforeResume) {
-          settle({ error: PROCESS_EXIT_ERROR });
+          settle({
+            content: createContent(PROCESS_EXIT_ERROR),
+            structuredContent: { error: PROCESS_EXIT_ERROR },
+            isError: true,
+          });
           return;
         }
         if (child.exitCode !== null || child.signalCode !== null) {
-          settle({ error: PROCESS_EXIT_ERROR });
+          settle({
+            content: createContent(PROCESS_EXIT_ERROR),
+            structuredContent: { error: PROCESS_EXIT_ERROR },
+            isError: true,
+          });
+        } else if (contextDestroyedAfterResume && !settled) {
+          finishSession();
         }
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
-        settle({ error: message });
+        settle({
+          content: createContent(message),
+          structuredContent: { error: message },
+          isError: true,
+        });
       });
   });
 }
@@ -304,7 +388,11 @@ async function evaluateExpression(
 
 async function cleanup(child: ChildProcess, client?: Client) {
   console.error('cleanup invoked', child.exitCode, child.signalCode);
-  if (!child.killed) {
+  if (
+    !child.killed &&
+    child.exitCode === null &&
+    child.signalCode === null
+  ) {
     child.kill('SIGKILL');
   }
 

@@ -123,8 +123,8 @@ test('tools/list returns debug-script tool', async (t) => {
   assert.deepEqual(tools[0], {
     name: 'debug-script',
     description:
-      'Execute a Node.js command in debug mode, pause at a breakpoint, evaluate an expression, and return the value.',
-    input_schema: {
+      'Execute a single-threaded Node.js command (with --inspect-brk) in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.',
+    inputSchema: {
       type: 'object',
       properties: {
         command: { type: 'string' },
@@ -158,12 +158,41 @@ test('debug-script evaluates expression at breakpoint', async (t) => {
     timeout: 5000,
   });
 
-  console.log('success response', response);
+  assert.deepEqual(response, {
+    content: [],
+    structuredContent: {
+      results: [
+        {
+          type: 'number',
+          value: 42,
+        },
+      ],
+    },
+  });
+});
+
+test('debug-script collects multiple breakpoint evaluations', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('debug-multi-hit.js');
+  const port = await getFreePort();
+
+  const response = await server.callDebug({
+    command: `node --inspect-brk=${port} ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 4 },
+    expression: 'product',
+    timeout: 5000,
+  });
 
   assert.deepEqual(response, {
-    result: {
-      type: 'number',
-      value: 42,
+    content: [],
+    structuredContent: {
+      results: [
+        { type: 'string', value: 'bread' },
+        { type: 'string', value: 'milk' },
+        { type: 'string', value: 'eggs' },
+      ],
     },
   });
 });
@@ -183,7 +212,13 @@ test('debug-script reports timeout when breakpoint not reached', async (t) => {
   });
 
   assert.deepEqual(response, {
-    error: 'Timeout waiting for breakpoint after 500ms',
+    content: [
+      { type: 'text', text: 'Timeout waiting for breakpoint after 500ms' },
+    ],
+    structuredContent: {
+      error: 'Timeout waiting for breakpoint after 500ms',
+    },
+    isError: true,
   });
 });
 
@@ -202,6 +237,12 @@ test('debug-script reports process exit before breakpoint', async (t) => {
   });
 
   assert.deepEqual(response, {
-    error: 'Process exited before breakpoint was hit',
+    content: [
+      { type: 'text', text: 'Process exited before breakpoint was hit' },
+    ],
+    structuredContent: {
+      error: 'Process exited before breakpoint was hit',
+    },
+    isError: true,
   });
 });
