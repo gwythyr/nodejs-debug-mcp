@@ -34,6 +34,14 @@ The primary benefit is not to mimic a human-in-the-loop debugging session, but t
 2. Choose **Add Server → Command**, paste `npx nodejs-debug-mcp`, and save.
 3. Trigger the `debug-script` tool from Claude Code when you need to inspect runtime state; Claude will launch the MCP command for you.
 
+Need a single-shot CLI setup instead of using the GUI? Run:
+
+```bash
+claude mcp add --scope user --transport stdio nodejs-debug-mcp -- npx -y nodejs-debug-mcp
+```
+
+That registers the server at the user scope and points Claude Code at the published `nodejs-debug-mcp` binary via `npx`, so the CLI fetches the latest version and launches it over stdio whenever you call `debug-script`.
+
 ### Codex CLI
 
 1. Add an MCP entry to your Codex configuration (for example, inside the CLI `mcpServers` list) with `"command": "npx nodejs-debug-mcp"` and a descriptive name.
