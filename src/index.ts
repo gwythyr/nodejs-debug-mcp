@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { z } from 'zod';
-
 import { createContent } from './breakpoint-session.js';
 import { debugScript } from './debug-tool.js';
-import type { DebugScriptArguments } from './types.js';
+import { debugScriptInputSchema, type DebugScriptArguments } from './types.js';
 
 const TOOL_DESCRIPTION =
   'Execute a single-threaded Node.js command (with --inspect-brk) in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.';
@@ -15,33 +13,15 @@ const server = new McpServer({
   version: '0.1.0',
 });
 
-const debugScriptInputSchema = {
-  command: z.string(),
-  breakpoint: z.object({
-    file: z.string(),
-    line: z.number(),
-  }),
-  expression: z.string(),
-  timeout: z.number(),
-};
-
 server.registerTool(
   'debug-script',
   {
     title: 'debug-script',
     description: TOOL_DESCRIPTION,
-    inputSchema: debugScriptInputSchema,
+    inputSchema: debugScriptInputSchema.shape,
   },
   async (args) => {
-    const debugArgs: DebugScriptArguments = {
-      command: args.command,
-      breakpoint: {
-        file: args.breakpoint.file,
-        line: args.breakpoint.line,
-      },
-      expression: args.expression,
-      timeout: args.timeout,
-    };
+    const debugArgs: DebugScriptArguments = debugScriptInputSchema.parse(args);
 
     try {
       return await debugScript(debugArgs);

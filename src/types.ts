@@ -1,14 +1,20 @@
-export interface BreakpointLocation {
-  file: string;
-  line: number;
-}
+import { z } from 'zod';
 
-export interface DebugScriptArguments {
-  command: string;
-  breakpoint: BreakpointLocation;
-  expression: string;
-  timeout: number;
-}
+export const breakpointLocationSchema = z.object({
+  file: z.string(),
+  line: z.number(),
+});
+
+export type BreakpointLocation = z.infer<typeof breakpointLocationSchema>;
+
+export const debugScriptInputSchema = z.object({
+  command: z.string(),
+  breakpoint: breakpointLocationSchema,
+  expression: z.string(),
+  timeout: z.number(),
+});
+
+export type DebugScriptArguments = z.infer<typeof debugScriptInputSchema>;
 
 export interface EvaluationResult {
   type: string;
