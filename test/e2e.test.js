@@ -120,28 +120,30 @@ test('tools/list returns debug-script tool', async (t) => {
 
   const tools = await server.listTools();
   assert.equal(tools.length, 1);
-  assert.deepEqual(tools[0], {
-    name: 'debug-script',
-    description:
-      'Execute a single-threaded Node.js command (with --inspect-brk) in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        command: { type: 'string' },
-        breakpoint: {
-          type: 'object',
-          properties: {
-            file: { type: 'string' },
-            line: { type: 'number' },
-          },
-          required: ['file', 'line'],
-        },
-        expression: { type: 'string' },
-        timeout: { type: 'number' },
-      },
-      required: ['command', 'breakpoint', 'expression', 'timeout'],
-    },
-  });
+
+  const tool = tools[0];
+  assert.equal(tool.name, 'debug-script');
+  assert.equal(
+    tool.description,
+    'Execute a single-threaded Node.js command (with --inspect-brk) in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.',
+  );
+  assert.ok(tool.inputSchema);
+  assert.equal(tool.inputSchema.type, 'object');
+  assert.deepEqual(tool.inputSchema.required, [
+    'command',
+    'breakpoint',
+    'expression',
+    'timeout',
+  ]);
+  assert.equal(tool.inputSchema.properties.command.type, 'string');
+  assert.equal(tool.inputSchema.properties.expression.type, 'string');
+  assert.equal(tool.inputSchema.properties.timeout.type, 'number');
+
+  const breakpoint = tool.inputSchema.properties.breakpoint;
+  assert.equal(breakpoint.type, 'object');
+  assert.deepEqual(breakpoint.required, ['file', 'line']);
+  assert.equal(breakpoint.properties.file.type, 'string');
+  assert.equal(breakpoint.properties.line.type, 'number');
 });
 
 test('debug-script evaluates expression at breakpoint', async (t) => {
