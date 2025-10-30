@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import type { Client } from 'chrome-remote-interface';
 
 import type {
@@ -6,6 +7,7 @@ import type {
   DebugScriptResponse,
   EvaluationResult,
   ToolContent,
+  StackFrame,
 } from './types.js';
 
 export const PROCESS_EXIT_ERROR = 'Process exited before breakpoint was hit';
@@ -23,11 +25,13 @@ interface SessionOptions {
   breakpointId: string;
   targetUrl: string;
   targetLineNumber: number;
+  targetScriptId?: string;
 }
 
 type DebuggerPausedEvent = {
   callFrames: Array<{
     callFrameId: string;
+    functionName?: string;
     url?: string;
     location?: { scriptId: string; lineNumber: number; columnNumber: number };
   }>;
@@ -44,6 +48,7 @@ export class BreakpointEvaluationSession {
 
   private state: SessionState = 'waiting-for-runtime';
   private readonly evaluations: EvaluationResult[] = [];
+  private readonly scriptIdToUrl = new Map<string, string>();
   private timeoutId: NodeJS.Timeout | null = null;
   private resolvePromise: ((value: DebugScriptResponse) => void) | null = null;
   private listenersAttached = false;
@@ -56,6 +61,10 @@ export class BreakpointEvaluationSession {
     this.client = client;
     this.Debugger = client.Debugger;
     this.Runtime = client.Runtime;
+
+    if (options.targetScriptId) {
+      this.scriptIdToUrl.set(options.targetScriptId, options.targetUrl);
+    }
   }
 
   start(): Promise<DebugScriptResponse> {
@@ -85,6 +94,7 @@ export class BreakpointEvaluationSession {
     this.child.on('close', this.handleProcessTermination);
     this.client.on('disconnect', this.handleProcessTermination);
     this.client.on('Runtime.executionContextDestroyed', this.handleExecutionContextDestroyed);
+    this.client.on('Debugger.scriptParsed', this.handleScriptParsed);
 
     this.listenersAttached = true;
   }
@@ -98,6 +108,7 @@ export class BreakpointEvaluationSession {
     this.child.off('close', this.handleProcessTermination);
     this.client.removeListener('disconnect', this.handleProcessTermination);
     this.client.removeListener('Runtime.executionContextDestroyed', this.handleExecutionContextDestroyed);
+    this.client.removeListener('Debugger.scriptParsed', this.handleScriptParsed);
 
     if (this.removePausedListener) {
       this.removePausedListener();
@@ -200,6 +211,17 @@ export class BreakpointEvaluationSession {
     this.finishOnProcessTermination();
   };
 
+  private readonly handleScriptParsed = (event: unknown) => {
+    if (!event || typeof event !== 'object') {
+      return;
+    }
+
+    const { scriptId, url } = event as { scriptId?: string; url?: string };
+    if (typeof scriptId === 'string' && typeof url === 'string' && url.trim()) {
+      this.scriptIdToUrl.set(scriptId, url);
+    }
+  };
+
   private readonly handleExecutionContextDestroyed = () => {
     if (this.isSettled()) {
       return;
@@ -265,9 +287,12 @@ export class BreakpointEvaluationSession {
       return;
     }
 
+    const stack = this.args.includeStack ? this.createStack(event.callFrames) : undefined;
+
     try {
       const evaluation = await evaluateExpression(this.Debugger, callFrameId, this.args.expression);
-      this.recordEvaluation(evaluation);
+      const result = stack ? { ...evaluation, stack } : evaluation;
+      this.recordEvaluation(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.settleWithError(message);
@@ -289,6 +314,58 @@ export class BreakpointEvaluationSession {
       this.settleWithError(message);
     }
   };
+
+  private createStack(callFrames: DebuggerPausedEvent['callFrames']): StackFrame[] {
+    return callFrames.map((callFrame) => {
+      const frame: StackFrame = {};
+
+      frame.function = callFrame.functionName ?? '';
+
+      const url = this.resolveCallFrameUrl(callFrame);
+      if (url) {
+        frame.file = this.normalizeFilePath(url);
+      }
+
+      if (callFrame.location) {
+        const { lineNumber, columnNumber } = callFrame.location;
+        frame.line = lineNumber + 1;
+        frame.column = columnNumber + 1;
+      }
+
+      return frame;
+    });
+  }
+
+  private resolveCallFrameUrl(callFrame: DebuggerPausedEvent['callFrames'][number]): string | undefined {
+    if (callFrame.url && callFrame.url.trim()) {
+      return callFrame.url;
+    }
+
+    const scriptId = callFrame.location?.scriptId;
+    if (scriptId && scriptId === this.options.targetScriptId) {
+      return this.options.targetUrl;
+    }
+
+    if (scriptId) {
+      const mapped = this.scriptIdToUrl.get(scriptId);
+      if (mapped) {
+        return mapped;
+      }
+    }
+
+    return undefined;
+  }
+
+  private normalizeFilePath(url: string): string {
+    if (url.startsWith('file://')) {
+      try {
+        return fileURLToPath(url);
+      } catch {
+        return url;
+      }
+    }
+    return url;
+  }
 }
 
 async function evaluateExpression(
@@ -365,4 +442,3 @@ async function evaluateExpression(
 
   return { type, value };
 }
-

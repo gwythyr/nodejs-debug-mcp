@@ -173,6 +173,38 @@ test('debug-script evaluates expression at breakpoint', async (t) => {
   });
 });
 
+test('debug-script returns stack information when includeStack is true', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('debug-success.js');
+  const port = await getFreePort();
+
+  const response = await server.callDebug({
+    command: `node --inspect-brk=${port} ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 4 },
+    expression: 'globalThis.__debugResult.answer',
+    timeout: 5000,
+    includeStack: true,
+  });
+
+  assert.ok(Array.isArray(response.structuredContent.results));
+  assert.equal(response.structuredContent.results.length, 1);
+
+  const [result] = response.structuredContent.results;
+  assert.equal(result.type, 'number');
+  assert.equal(result.value, 42);
+
+  assert.ok(Array.isArray(result.stack));
+  assert.ok(result.stack.length >= 1);
+
+  const topFrame = result.stack[0];
+  assert.equal(topFrame.file, script);
+  assert.equal(typeof topFrame.line, 'number');
+  assert.ok(topFrame.line >= 1);
+  assert.equal(typeof topFrame.function, 'string');
+});
+
 test('debug-script collects multiple breakpoint evaluations', async (t) => {
   const server = createServer();
   t.after(() => server.close());

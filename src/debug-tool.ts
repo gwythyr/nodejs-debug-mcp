@@ -102,6 +102,9 @@ async function runDebugSession(
   });
 
   const breakpointId = setBreakpointResult?.breakpointId ?? '';
+  const targetScriptId = (
+    setBreakpointResult as { locations?: Array<{ scriptId?: string }> } | undefined
+  )?.locations?.[0]?.scriptId;
 
   return waitForBreakpointAndEvaluate(
     args,
@@ -110,6 +113,7 @@ async function runDebugSession(
     breakpointId,
     fileUrl,
     expectedLineNumber,
+    targetScriptId,
   );
 }
 
@@ -120,11 +124,13 @@ function waitForBreakpointAndEvaluate(
   breakpointId: string,
   targetUrl: string,
   targetLineNumber: number,
+  targetScriptId?: string,
 ): Promise<DebugScriptResponse> {
   const session = new BreakpointEvaluationSession(args, child, client, {
     breakpointId,
     targetUrl,
     targetLineNumber,
+    targetScriptId,
   });
   return session.start();
 }

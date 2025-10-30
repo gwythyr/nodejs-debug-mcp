@@ -12,6 +12,7 @@ export const debugScriptInputSchema = z.object({
   breakpoint: breakpointLocationSchema,
   expression: z.string(),
   timeout: z.number(),
+  includeStack: z.boolean().optional(),
 });
 
 export type DebugScriptArguments = z.infer<typeof debugScriptInputSchema>;
@@ -19,6 +20,14 @@ export type DebugScriptArguments = z.infer<typeof debugScriptInputSchema>;
 export interface EvaluationResult {
   type: string;
   value: unknown;
+  stack?: StackFrame[];
+}
+
+export interface StackFrame {
+  function?: string;
+  file?: string;
+  line?: number;
+  column?: number;
 }
 
 export interface ToolContent {
