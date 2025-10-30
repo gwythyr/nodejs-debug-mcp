@@ -199,6 +199,85 @@ test('debug-script collects multiple breakpoint evaluations', async (t) => {
   });
 });
 
+test('debug-script uses default inspector port when command omits explicit port', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('debug-success.js');
+
+  const response = await server.callDebug({
+    command: `node --inspect-brk ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 4 },
+    expression: 'Object.keys(globalThis.__debugResult)',
+    timeout: 5000,
+  });
+
+  assert.deepEqual(response, {
+    content: [],
+    structuredContent: {
+      results: [
+        {
+          type: 'array',
+          value: ['answer'],
+        },
+      ],
+    },
+  });
+});
+
+test('debug-script reports process exit before breakpoint is hit', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('debug-exit.js');
+  const port = await getFreePort();
+
+  const response = await server.callDebug({
+    command: `node --inspect-brk=${port} ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 10 },
+    expression: 'true',
+    timeout: 2000,
+  });
+
+  assert.deepEqual(response, {
+    content: [
+      {
+        type: 'text',
+        text: 'Process exited before breakpoint was hit',
+      },
+    ],
+    structuredContent: { error: 'Process exited before breakpoint was hit' },
+    isError: true,
+  });
+});
+
+test('debug-script respects timeout when breakpoint is never reached', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('debug-timeout.js');
+  const port = await getFreePort();
+  const timeout = 500;
+
+  const response = await server.callDebug({
+    command: `node --inspect-brk=${port} ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 4 },
+    expression: 'globalThis.reached',
+    timeout,
+  });
+
+  assert.deepEqual(response, {
+    content: [
+      {
+        type: 'text',
+        text: `Timeout waiting for breakpoint after ${timeout}ms`,
+      },
+    ],
+    structuredContent: { error: `Timeout waiting for breakpoint after ${timeout}ms` },
+    isError: true,
+  });
+});
+
 test('debug-script reports timeout when breakpoint not reached', async (t) => {
   const server = createServer();
   t.after(() => server.close());
