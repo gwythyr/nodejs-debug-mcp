@@ -61,6 +61,27 @@ node --test test/e2e.test.js  # Test
 
 See `SPECIFICATION.md` for implementation details.
 
+## Release
+
+To publish a new version to npm:
+
+```bash
+# Patch version (0.1.2 → 0.1.3)
+npm version patch && git push --follow-tags
+
+# Minor version (0.1.2 → 0.2.0)
+npm version minor && git push --follow-tags
+
+# Major version (0.1.2 → 1.0.0)
+npm version major && git push --follow-tags
+```
+
+This automatically:
+- Updates package.json version
+- Creates a git commit and tag
+- Pushes to GitHub
+- Triggers the publish workflow
+
 ## License
 
 MIT
