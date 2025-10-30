@@ -23,6 +23,7 @@ The tool runs the script, pauses at that line each time it executes, evaluates t
 - **breakpoint:** `{ file: string, line: number }`
 - **expression:** JavaScript expression to evaluate
 - **timeout:** Maximum execution time in milliseconds
+- **includeStack:** (optional) Include call stack frames in the result
 
 ## Setup
 
