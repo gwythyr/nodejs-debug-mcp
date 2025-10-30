@@ -35,14 +35,21 @@ claude mcp add --scope user --transport stdio nodejs-debug-mcp -- npx -y nodejs-
 ### Codex CLI
 
 ```bash
-codex mcp add npx -- -y nodejs-debug-mcp nodejs-debug-mcp
+codex mcp add nodejs-debug-mcp -- npx -y nodejs-debug-mcp
 ```
 
 ### Cursor
 
-Settings → MCP → Add Command Server:
-```bash
-npx nodejs-debug-mcp
+Add to your MCP settings config file:
+```json
+{
+  "mcpServers": {
+    "nodejs-debug-mcp": {
+      "command": "npx",
+      "args": ["-y", "nodejs-debug-mcp"]
+    }
+  }
+}
 ```
 
 ## Development
