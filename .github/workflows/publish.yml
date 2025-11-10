@@ -27,6 +27,14 @@ jobs:
           cache: 'npm'
           registry-url: https://registry.npmjs.org
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install debugpy
+        run: python -m pip install --user debugpy
+
       - name: Install dependencies
         run: npm ci
 
