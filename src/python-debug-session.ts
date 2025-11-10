@@ -40,6 +40,16 @@ export async function debugPythonScript(args: DebugScriptArguments): Promise<Deb
     timeout: normalizeTimeout(args.timeout),
   };
   const address = extractDebugpyAddress(normalizedArgs.command);
+  try {
+    await ensureDebugpyPortAvailable(address);
+  } catch (error) {
+    const message = describeError(error) || 'Unable to reserve debugpy listen address';
+    return {
+      content: createContent(message),
+      structuredContent: { error: message },
+      isError: true,
+    };
+  }
   const env = await preparePythonEnvironment(normalizedArgs.command);
 
   const child = spawn(normalizedArgs.command, {
@@ -75,6 +85,14 @@ export async function debugPythonScript(args: DebugScriptArguments): Promise<Deb
   }
 
   try {
+    if (processExited) {
+      return {
+        content: createContent(PROCESS_EXIT_ERROR),
+        structuredContent: { error: PROCESS_EXIT_ERROR },
+        isError: true,
+      };
+    }
+
     const session = new PythonBreakpointEvaluationSession(
       normalizedArgs,
       child,
@@ -125,6 +143,10 @@ class PythonBreakpointEvaluationSession {
     return new Promise<DebugScriptResponse>((resolve) => {
       this.resolvePromise = resolve;
       this.attachListeners();
+      if (this.childExited()) {
+        this.finishOnProcessTermination();
+        return;
+      }
       void this.runDebugger().catch((error) => {
         this.settleWithError(error);
       });
@@ -161,6 +183,10 @@ class PythonBreakpointEvaluationSession {
     this.socket.off('error', this.handleSocketError);
 
     this.listenersAttached = false;
+  }
+
+  private childExited(): boolean {
+    return this.child.exitCode !== null || this.child.signalCode !== null;
   }
 
   private async runDebugger(): Promise<void> {
@@ -632,6 +658,52 @@ async function cleanupPython(child: ChildProcess, client?: DebugClient): Promise
       // No action required if disconnect fails.
     }
   }
+}
+
+async function ensureDebugpyPortAvailable(address: DebugpyAddress): Promise<void> {
+  const host = address.host || DEFAULT_DEBUGPY_HOST;
+
+  await new Promise<void>((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+
+    const closeServer = (callback: () => void) => {
+      server.close(() => {
+        callback();
+      });
+    };
+
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      closeServer(() => {
+        if (error?.code === 'EADDRINUSE') {
+          reject(createPortInUseError(address));
+          return;
+        }
+        reject(createPortProbeError(address, error));
+      });
+    });
+
+    server.listen({ host, port: address.port, exclusive: true }, () => {
+      closeServer(resolve);
+    });
+  });
+}
+
+function createPortInUseError(address: DebugpyAddress): Error {
+  return new Error(`debugpy listen address ${formatDebugpyAddress(address)} is already in use`);
+}
+
+function createPortProbeError(address: DebugpyAddress, cause: unknown): Error {
+  const details = describeError(cause);
+  const suffix = details ? ` (${details})` : '';
+  return new Error(`Unable to verify debugpy listen address ${formatDebugpyAddress(address)}${suffix}`);
+}
+
+function formatDebugpyAddress(address: DebugpyAddress): string {
+  const host = address.host || DEFAULT_DEBUGPY_HOST;
+  const needsBrackets = host.includes(':') && !host.startsWith('[');
+  const formattedHost = needsBrackets ? `[${host}]` : host;
+  return `${formattedHost}:${address.port}`;
 }
 
 function delay(ms: number): Promise<void> {

@@ -290,6 +290,65 @@ test('debug-script reports python process exit before breakpoint', async (t) => 
   });
 });
 
+test('debug-script reports python listen port collisions before launching script', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('python-debug-success.py');
+  const port = await getFreePort();
+
+  const occupied = net.createServer();
+  await new Promise((resolve, reject) => {
+    occupied.once('error', reject);
+    occupied.listen(port, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise((resolve) => occupied.close(resolve)));
+
+  const response = await server.callDebug({
+    command: `python3 -m debugpy --listen 127.0.0.1:${port} --wait-for-client ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 6 },
+    expression: "payload['answer']",
+    timeout: 2000,
+    runtime: 'python',
+  });
+
+  const message = `debugpy listen address 127.0.0.1:${port} is already in use`;
+  assert.deepEqual(response, {
+    content: [{ type: 'text', text: message }],
+    structuredContent: { error: message },
+    isError: true,
+  });
+});
+
+test('debug-script reports occupied node inspector port before connecting', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('debug-success.js');
+  const port = await getFreePort();
+
+  const occupied = net.createServer();
+  await new Promise((resolve, reject) => {
+    occupied.once('error', reject);
+    occupied.listen(port, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise((resolve) => occupied.close(resolve)));
+
+  const response = await server.callDebug({
+    command: `node --inspect-brk=${port} ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 4 },
+    expression: 'true',
+    timeout: 2000,
+  });
+
+  const message = `Node inspector port ${port} is already in use`;
+  assert.deepEqual(response, {
+    content: [{ type: 'text', text: message }],
+    structuredContent: { error: message },
+    isError: true,
+  });
+});
+
 test('debug-script returns stack information when includeStack is true', async (t) => {
   const server = createServer();
   t.after(() => server.close());

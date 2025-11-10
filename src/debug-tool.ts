@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import net from 'node:net';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import CDP, { type Client } from 'chrome-remote-interface';
@@ -10,6 +11,7 @@ import type { DebugScriptArguments, DebugScriptResponse } from './types.js';
 const NODE_PORT_REGEX = /--inspect-brk=(\d+)/;
 const CONNECT_RETRY_DELAY_MS = 100;
 const MAX_CONNECT_WAIT_MS = 5000;
+const NODE_INSPECTOR_HOST = '127.0.0.1';
 
 export async function debugScript(args: DebugScriptArguments): Promise<DebugScriptResponse> {
   if (args.runtime === 'python') {
@@ -20,6 +22,16 @@ export async function debugScript(args: DebugScriptArguments): Promise<DebugScri
 
 async function debugNodeScript(args: DebugScriptArguments): Promise<DebugScriptResponse> {
   const port = extractNodePort(args.command);
+  try {
+    await ensureNodeInspectorPortAvailable(port);
+  } catch (error) {
+    const message = describeError(error) || `Inspector port ${port} is unavailable`;
+    return {
+      content: createContent(message),
+      structuredContent: { error: message },
+      isError: true,
+    };
+  }
 
   const child = spawn(args.command, {
     cwd: process.cwd(),
@@ -79,7 +91,7 @@ async function connectToInspector(
     }
 
     try {
-      return await CDP({ host: '127.0.0.1', port });
+      return await CDP({ host: NODE_INSPECTOR_HOST, port });
     } catch (error) {
       if (Date.now() - start >= maxWait) {
         throw error;
@@ -166,4 +178,54 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+async function ensureNodeInspectorPortAvailable(port: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+
+    const closeServer = (callback: () => void) => {
+      server.close(() => {
+        callback();
+      });
+    };
+
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      closeServer(() => {
+        if (error?.code === 'EADDRINUSE') {
+          reject(createInspectorPortInUseError(port));
+          return;
+        }
+        reject(createInspectorPortProbeError(port, error));
+      });
+    });
+
+    server.listen({ host: NODE_INSPECTOR_HOST, port, exclusive: true }, () => {
+      closeServer(resolve);
+    });
+  });
+}
+
+function createInspectorPortInUseError(port: number): Error {
+  return new Error(`Node inspector port ${port} is already in use`);
+}
+
+function createInspectorPortProbeError(port: number, cause: unknown): Error {
+  const details = describeError(cause);
+  const suffix = details ? ` (${details})` : '';
+  return new Error(`Unable to verify Node inspector port ${port}${suffix}`);
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error && typeof error.message === 'string') {
+    return error.message;
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  if (error === undefined || error === null) {
+    return '';
+  }
+  return String(error);
 }
