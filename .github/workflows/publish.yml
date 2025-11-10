@@ -13,7 +13,7 @@ jobs:
       contents: read
     environment:
       name: npm
-      url: https://www.npmjs.com/package/nodejs-debug-mcp
+      url: https://www.npmjs.com/package/mcp-debug-unit
     steps:
       - name: Checkout
         uses: actions/checkout@v4
