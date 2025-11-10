@@ -4,14 +4,22 @@ import { pathToFileURL } from 'node:url';
 import CDP, { type Client } from 'chrome-remote-interface';
 
 import { BreakpointEvaluationSession, PROCESS_EXIT_ERROR, createContent } from './breakpoint-session.js';
+import { debugPythonScript } from './python-debug-session.js';
 import type { DebugScriptArguments, DebugScriptResponse } from './types.js';
 
-const PORT_REGEX = /--inspect-brk=(\d+)/;
+const NODE_PORT_REGEX = /--inspect-brk=(\d+)/;
 const CONNECT_RETRY_DELAY_MS = 100;
 const MAX_CONNECT_WAIT_MS = 5000;
 
 export async function debugScript(args: DebugScriptArguments): Promise<DebugScriptResponse> {
-  const port = extractPort(args.command);
+  if (args.runtime === 'python') {
+    return debugPythonScript(args);
+  }
+  return debugNodeScript(args);
+}
+
+async function debugNodeScript(args: DebugScriptArguments): Promise<DebugScriptResponse> {
+  const port = extractNodePort(args.command);
 
   const child = spawn(args.command, {
     cwd: process.cwd(),
@@ -49,8 +57,8 @@ export async function debugScript(args: DebugScriptArguments): Promise<DebugScri
   }
 }
 
-function extractPort(command: string): number {
-  const match = command.match(PORT_REGEX);
+function extractNodePort(command: string): number {
+  const match = command.match(NODE_PORT_REGEX);
   if (!match) {
     return 9229;
   }
@@ -134,7 +142,6 @@ function waitForBreakpointAndEvaluate(
   });
   return session.start();
 }
-
 
 async function cleanup(child: ChildProcess, client?: Client) {
   console.error('cleanup invoked', child.exitCode, child.signalCode);

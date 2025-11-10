@@ -6,7 +6,7 @@ import { debugScript } from './debug-tool.js';
 import { debugScriptInputSchema, type DebugScriptArguments } from './types.js';
 
 const TOOL_DESCRIPTION =
-  'Execute a single-threaded Node.js command (with --inspect-brk) in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.';
+  'Execute a single-threaded Node.js (with --inspect-brk) or Python (with debugpy) command in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.';
 
 const server = new McpServer({
   name: 'nodejs-debug-mcp',

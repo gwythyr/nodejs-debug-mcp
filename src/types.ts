@@ -7,12 +7,16 @@ export const breakpointLocationSchema = z.object({
 
 export type BreakpointLocation = z.infer<typeof breakpointLocationSchema>;
 
+export const runtimeSchema = z.enum(['node', 'python']);
+export type Runtime = z.infer<typeof runtimeSchema>;
+
 export const debugScriptInputSchema = z.object({
   command: z.string(),
   breakpoint: breakpointLocationSchema,
   expression: z.string(),
   timeout: z.number(),
   includeStack: z.boolean().optional(),
+  runtime: runtimeSchema.optional().default('node'),
 });
 
 export type DebugScriptArguments = z.infer<typeof debugScriptInputSchema>;

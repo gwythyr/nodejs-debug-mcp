@@ -1,6 +1,6 @@
 # nodejs-debug-mcp
 
-MCP server that gives coding agents the ability to debug Node.js scripts without modifying source code.
+MCP server that gives coding agents the ability to debug Node.js **and** Python scripts without modifying source code.
 
 ## Why install this
 
@@ -19,11 +19,12 @@ The tool runs the script, pauses at that line each time it executes, evaluates t
 
 ## Parameters
 
-- **command:** Node.js command with `--inspect-brk` flag (enables debugging and pauses execution at start)
+- **command:** Debuggable command to run. For Node.js pass `--inspect-brk`, for Python run under `debugpy` with `--listen` + `--wait-for-client`.
 - **breakpoint:** `{ file: string, line: number }`
-- **expression:** JavaScript expression to evaluate
+- **expression:** Expression to evaluate when the breakpoint is hit. Works for both runtimes.
 - **timeout:** Maximum execution time in milliseconds
 - **includeStack:** (optional) Include call stack frames in the result
+- **runtime:** (optional) `'node'` (default) or `'python'`
 
 ## Setup
 
@@ -59,6 +60,13 @@ Add to your MCP settings config file:
 npx tsc                        # Build
 node --test test/e2e.test.js  # Test
 ```
+
+### Python runtime requirements
+
+- Install `debugpy` (e.g. `python3 -m pip install debugpy`)
+- Launch your script via `python3 -m debugpy --listen 127.0.0.1:5678 --wait-for-client ./script.py`
+- Call `debug-script` with `runtime: "python"` and the same `listen` host:port in the `command`
+- Use absolute or relative paths for the `breakpoint.file` (they will be resolved automatically)
 
 See `SPECIFICATION.md` for implementation details.
 

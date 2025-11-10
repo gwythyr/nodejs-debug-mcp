@@ -125,7 +125,7 @@ test('tools/list returns debug-script tool', async (t) => {
   assert.equal(tool.name, 'debug-script');
   assert.equal(
     tool.description,
-    'Execute a single-threaded Node.js command (with --inspect-brk) in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.',
+    'Execute a single-threaded Node.js (with --inspect-brk) or Python (with debugpy) command in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.',
   );
   assert.ok(tool.inputSchema);
   assert.equal(tool.inputSchema.type, 'object');
@@ -170,6 +170,123 @@ test('debug-script evaluates expression at breakpoint', async (t) => {
         },
       ],
     },
+  });
+});
+
+test('debug-script evaluates python expression at breakpoint', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('python-debug-success.py');
+  const port = await getFreePort();
+
+  const response = await server.callDebug({
+    command: `python3 -m debugpy --listen 127.0.0.1:${port} --wait-for-client ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 6 },
+    expression: "payload['answer']",
+    timeout: 5000,
+    runtime: 'python',
+  });
+
+  assert.deepEqual(response, {
+    content: [],
+    structuredContent: {
+      results: [
+        {
+          type: 'number',
+          value: 42,
+        },
+      ],
+    },
+  });
+});
+
+test('debug-script captures python evaluations across a file-backed workflow', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('python-order-processing.py');
+  const port = await getFreePort();
+
+  const response = await server.callDebug({
+    command: `python3 -m debugpy --listen 127.0.0.1:${port} --wait-for-client ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 32 },
+    expression:
+      '{"id": order["id"], "status": "processed", "gross": round(gross, 2), "items": order["items"]}',
+    timeout: 5000,
+    runtime: 'python',
+  });
+
+  assert.deepEqual(response, {
+    content: [],
+    structuredContent: {
+      results: [
+        { type: 'object', value: { id: 'A100', status: 'processed', gross: 126, items: 3 } },
+        { type: 'object', value: { id: 'B200', status: 'processed', gross: 84, items: 2 } },
+        { type: 'object', value: { id: 'C300', status: 'processed', gross: 44.1, items: 1 } },
+      ],
+    },
+  });
+});
+
+test('debug-script returns python stack frames when includeStack is true', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('python-nested-stack.py');
+  const port = await getFreePort();
+
+  const response = await server.callDebug({
+    command: `python3 -m debugpy --listen 127.0.0.1:${port} --wait-for-client ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 20 },
+    expression: 'profile',
+    timeout: 5000,
+    includeStack: true,
+    runtime: 'python',
+  });
+
+  assert.ok(Array.isArray(response.structuredContent.results));
+  assert.equal(response.structuredContent.results.length, 1);
+
+  const [result] = response.structuredContent.results;
+  assert.equal(result.type, 'object');
+  assert.deepEqual(result.value, {
+    customer: 'acct-4488',
+    baseline: 175,
+    drift_above: 2,
+  });
+
+  assert.ok(Array.isArray(result.stack));
+  assert.ok(result.stack.length >= 2);
+  assert.equal(result.stack[0].file, script);
+  assert.equal(result.stack[0].function, 'calculate_variance');
+  assert.ok(result.stack.some((frame) => frame.function === 'assemble_report'));
+});
+
+test('debug-script reports python process exit before breakpoint', async (t) => {
+  const server = createServer();
+  t.after(() => server.close());
+
+  const script = fixturePath('python-missing-config.py');
+  const port = await getFreePort();
+
+  const response = await server.callDebug({
+    command: `python3 -m debugpy --listen 127.0.0.1:${port} --wait-for-client ${JSON.stringify(script)}`,
+    breakpoint: { file: script, line: 19 },
+    expression: 'payload',
+    timeout: 2000,
+    runtime: 'python',
+  });
+
+  assert.deepEqual(response, {
+    content: [
+      {
+        type: 'text',
+        text: 'Process exited before breakpoint was hit',
+      },
+    ],
+    structuredContent: { error: 'Process exited before breakpoint was hit' },
+    isError: true,
   });
 });
 
