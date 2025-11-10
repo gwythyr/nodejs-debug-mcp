@@ -226,7 +226,7 @@ The implementation focuses on the successful execution path. The following are e
 ## Project Structure
 
 ```
-nodejs-debug-mcp/
+mcp-debug-unit/
 ├── package.json
 ├── tsconfig.json
 ├── src/

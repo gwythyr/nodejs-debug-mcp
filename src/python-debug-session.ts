@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
+import { delimiter, resolve } from 'node:path';
 import net from 'node:net';
+import { homedir } from 'node:os';
 import { DebugClient } from '@vscode/debugadapter-testsupport';
 import type { DebugProtocol } from '@vscode/debugprotocol';
 
@@ -18,6 +21,12 @@ const LISTEN_REGEX = /--listen(?:=|\s+)([^\s]+)/;
 const CONNECT_RETRY_DELAY_MS = 100;
 const MAX_CONNECT_WAIT_MS = 5000;
 const STACK_FRAME_LIMIT = 20;
+const DEBUGPY_SPEC = 'debugpy>=1.8.0,<2.0.0';
+const DEBUGPY_CACHE_ENV = 'MCP_DEBUG_UNIT_DEBUGPY_DIR';
+const LEGACY_DEBUGPY_CACHE_ENV = 'NODEJS_DEBUG_MCP_DEBUGPY_DIR';
+const DEBUGPY_INSTALL_BASE = determineDebugpyInstallBase();
+
+const debugpySetupCache = new Map<string, Promise<string | null>>();
 
 interface DebugpyAddress {
   host: string;
@@ -26,10 +35,11 @@ interface DebugpyAddress {
 
 export async function debugPythonScript(args: DebugScriptArguments): Promise<DebugScriptResponse> {
   const address = extractDebugpyAddress(args.command);
+  const env = await preparePythonEnvironment(args.command);
 
   const child = spawn(args.command, {
     cwd: process.cwd(),
-    env: process.env,
+    env,
     shell: true,
     stdio: 'ignore',
   });
@@ -146,7 +156,7 @@ class PythonBreakpointEvaluationSession {
     const initializedPromise = this.waitForClientEvent('initialized');
 
     const initializeResponse = await this.client.initializeRequest({
-      adapterID: 'nodejs-debug-mcp-python',
+      adapterID: 'mcp-debug-unit-python',
       linesStartAt1: true,
       columnsStartAt1: true,
       pathFormat: 'path',
@@ -573,4 +583,295 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function determineDebugpyInstallBase(): string {
+  const override = process.env[DEBUGPY_CACHE_ENV] ?? process.env[LEGACY_DEBUGPY_CACHE_ENV];
+  if (override && override.trim()) {
+    return resolve(override);
+  }
+
+  if (process.platform === 'win32') {
+    const localAppData =
+      process.env.LOCALAPPDATA ?? resolve(homedir(), 'AppData', 'Local');
+    return resolve(localAppData, 'mcp-debug-unit', 'cache', 'debugpy');
+  }
+
+  if (process.platform === 'darwin') {
+    return resolve(homedir(), 'Library', 'Caches', 'mcp-debug-unit', 'debugpy');
+  }
+
+  return resolve(homedir(), '.cache', 'mcp-debug-unit', 'debugpy');
+}
+
+async function preparePythonEnvironment(command: string): Promise<NodeJS.ProcessEnv> {
+  const executable = extractPythonExecutable(command);
+  if (!executable) {
+    return process.env;
+  }
+
+  const pythonPathAddition = await ensureDebugpyForInterpreter(executable);
+  if (!pythonPathAddition) {
+    return process.env;
+  }
+
+  const env = { ...process.env };
+  env.PYTHONPATH = appendPythonPath(env.PYTHONPATH, pythonPathAddition);
+  return env;
+}
+
+function appendPythonPath(current: string | undefined, addition: string): string {
+  if (!current) {
+    return addition;
+  }
+  return `${addition}${delimiter}${current}`;
+}
+
+async function ensureDebugpyForInterpreter(executable: string): Promise<string | null> {
+  let setupPromise = debugpySetupCache.get(executable);
+  if (!setupPromise) {
+    setupPromise = installDebugpyForInterpreter(executable);
+    debugpySetupCache.set(executable, setupPromise);
+  }
+  return setupPromise;
+}
+
+async function installDebugpyForInterpreter(executable: string): Promise<string | null> {
+  if (await canImportDebugpy(executable)) {
+    return null;
+  }
+
+  const installDir = resolve(DEBUGPY_INSTALL_BASE, hashExecutable(executable));
+  const augmentedPythonPath = appendPythonPath(undefined, installDir);
+
+  if (await canImportDebugpy(executable, augmentedPythonPath)) {
+    return installDir;
+  }
+
+  await installDebugpy(executable, installDir);
+
+  if (!(await canImportDebugpy(executable, augmentedPythonPath))) {
+    throw new Error(
+      `debugpy is required for python debugging. Please install it manually via "${executable} -m pip install debugpy" and retry.`,
+    );
+  }
+
+  return installDir;
+}
+
+async function canImportDebugpy(executable: string, pythonPath?: string): Promise<boolean> {
+  const env = buildSpawnEnv(pythonPath);
+  try {
+    await execPython(executable, [
+      '-c',
+      'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("debugpy") else 1)',
+    ], env);
+    return true;
+  } catch (error) {
+    if (error instanceof ProcessError && error.code === 1) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function installDebugpy(executable: string, targetDir: string): Promise<void> {
+  await mkdir(targetDir, { recursive: true });
+  try {
+    await execPython(executable, [
+      '-m',
+      'pip',
+      'install',
+      '--no-cache-dir',
+      '--upgrade',
+      '--target',
+      targetDir,
+      DEBUGPY_SPEC,
+    ]);
+  } catch (error) {
+    if (error instanceof ProcessError && /No module named pip/.test(error.stderr)) {
+      await execPython(executable, ['-m', 'ensurepip', '--upgrade']);
+      await execPython(executable, [
+        '-m',
+        'pip',
+        'install',
+        '--no-cache-dir',
+        '--upgrade',
+        '--target',
+        targetDir,
+        DEBUGPY_SPEC,
+      ]);
+      return;
+    }
+    throw new Error(
+      `Unable to install debugpy via pip for interpreter "${executable}": ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function buildSpawnEnv(pythonPath?: string): NodeJS.ProcessEnv | undefined {
+  if (!pythonPath) {
+    return process.env;
+  }
+  return {
+    ...process.env,
+    PYTHONPATH: appendPythonPath(process.env.PYTHONPATH, pythonPath),
+  };
+}
+
+async function execPython(
+  executable: string,
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<ProcessResult> {
+  const result = await runProcess(executable, args, env);
+  if (result.code === 0) {
+    return result;
+  }
+  throw new ProcessError(
+    `Command "${executable} ${args.join(' ')}" failed with exit code ${
+      result.code ?? 'null'
+    }`,
+    result,
+  );
+}
+
+function runProcess(
+  executable: string,
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<ProcessResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', reject);
+    child.on('exit', (code, signal) => {
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
+}
+
+function hashExecutable(executable: string): string {
+  return createHash('sha256').update(executable).digest('hex').slice(0, 12);
+}
+
+function extractPythonExecutable(command: string): string | null {
+  let index = 0;
+  while (index < command.length && /\s/.test(command[index] ?? '')) {
+    index++;
+  }
+
+  while (index < command.length) {
+    const token = readShellToken(command, index);
+    if (!token) {
+      return null;
+    }
+
+    index = token.nextIndex;
+
+    if (isEnvAssignment(token.token)) {
+      while (index < command.length && /\s/.test(command[index] ?? '')) {
+        index++;
+      }
+      continue;
+    }
+
+    return token.token;
+  }
+
+  return null;
+}
+
+function readShellToken(
+  input: string,
+  startIndex: number,
+): { token: string; nextIndex: number } | null {
+  const len = input.length;
+  let index = startIndex;
+
+  while (index < len && /\s/.test(input[index] ?? '')) {
+    index++;
+  }
+
+  let token = '';
+  let quote: '"' | "'" | null = null;
+
+  for (; index < len; index++) {
+    const char = input[index] ?? '';
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+        continue;
+      }
+      if (char === '\\' && quote === '"' && index + 1 < len) {
+        token += input[index + 1] ?? '';
+        index++;
+        continue;
+      }
+      token += char;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      break;
+    }
+
+    token += char;
+  }
+
+  if (!token) {
+    return null;
+  }
+
+  return { token, nextIndex: index };
+}
+
+function isEnvAssignment(token: string): boolean {
+  const equalsIndex = token.indexOf('=');
+  if (equalsIndex <= 0) {
+    return false;
+  }
+
+  const key = token.slice(0, equalsIndex);
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+}
+
+interface ProcessResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}
+
+class ProcessError extends Error {
+  public readonly code: number | null;
+  public readonly signal: NodeJS.Signals | null;
+  public readonly stdout: string;
+  public readonly stderr: string;
+
+  constructor(message: string, result: ProcessResult) {
+    super(message);
+    this.code = result.code;
+    this.signal = result.signal;
+    this.stdout = result.stdout;
+    this.stderr = result.stderr;
+  }
 }

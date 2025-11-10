@@ -1,10 +1,11 @@
 {
-  "name": "nodejs-debug-mcp",
+  "name": "mcp-debug-unit",
   "version": "0.3.0",
   "description": "Model Context Protocol server exposing a debug-script tool for Node.js inspector sessions.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
+    "mcp-debug-unit": "dist/index.js",
     "nodejs-debug-mcp": "dist/index.js"
   },
   "types": "dist/index.d.ts",

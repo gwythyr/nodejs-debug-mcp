@@ -9,7 +9,7 @@ const TOOL_DESCRIPTION =
   'Execute a single-threaded Node.js (with --inspect-brk) or Python (with debugpy) command in debug mode, pause at a breakpoint, evaluate an expression, and return the values for each breakpoint hit.';
 
 const server = new McpServer({
-  name: 'nodejs-debug-mcp',
+  name: 'mcp-debug-unit',
   version: '0.1.0',
 });
 
