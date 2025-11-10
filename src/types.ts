@@ -13,7 +13,8 @@ export type Runtime = z.infer<typeof runtimeSchema>;
 export const debugScriptInputSchema = z.object({
   command: z.string().describe(
     'Node.js: "node --inspect-brk=<port> script.js". ' +
-    'Python: "python3 -m debugpy --listen 127.0.0.1:<port> --wait-for-client script.py". '
+    'Python: "python3 -m debugpy --listen 127.0.0.1:<port> --wait-for-client script.py". ' +
+    'Use relative paths for script files (e.g., "src/example.py" not "/full/path/to/tmp/example.py").'
   ),
   breakpoint: breakpointLocationSchema.describe(
     'Breakpoint pauses BEFORE executing the line. To inspect a variable, set breakpoint AFTER its assignment.'
