@@ -20,6 +20,7 @@ const DEFAULT_DEBUGPY_PORT = 5678;
 const LISTEN_REGEX = /--listen(?:=|\s+)([^\s]+)/;
 const CONNECT_RETRY_DELAY_MS = 100;
 const MAX_CONNECT_WAIT_MS = 5000;
+const DEFAULT_BREAKPOINT_TIMEOUT_MS = 5000;
 const STACK_FRAME_LIMIT = 20;
 const DEBUGPY_SPEC = 'debugpy>=1.8.0,<2.0.0';
 const DEBUGPY_CACHE_ENV = 'MCP_DEBUG_UNIT_DEBUGPY_DIR';
@@ -34,10 +35,14 @@ interface DebugpyAddress {
 }
 
 export async function debugPythonScript(args: DebugScriptArguments): Promise<DebugScriptResponse> {
-  const address = extractDebugpyAddress(args.command);
-  const env = await preparePythonEnvironment(args.command);
+  const normalizedArgs: DebugScriptArguments = {
+    ...args,
+    timeout: normalizeTimeout(args.timeout),
+  };
+  const address = extractDebugpyAddress(normalizedArgs.command);
+  const env = await preparePythonEnvironment(normalizedArgs.command);
 
-  const child = spawn(args.command, {
+  const child = spawn(normalizedArgs.command, {
     cwd: process.cwd(),
     env,
     shell: true,
@@ -54,7 +59,7 @@ export async function debugPythonScript(args: DebugScriptArguments): Promise<Deb
   let socket: net.Socket | undefined;
 
   try {
-    ({ client, socket } = await connectToDebugpy(address, args.timeout, () => processExited));
+    ({ client, socket } = await connectToDebugpy(address, normalizedArgs.timeout, () => processExited));
   } catch (error) {
     child.off('exit', exitMarker);
     await cleanupPython(child, client);
@@ -70,7 +75,13 @@ export async function debugPythonScript(args: DebugScriptArguments): Promise<Deb
   }
 
   try {
-    const session = new PythonBreakpointEvaluationSession(args, child, client, socket, address);
+    const session = new PythonBreakpointEvaluationSession(
+      normalizedArgs,
+      child,
+      client,
+      socket,
+      address,
+    );
     return await session.start();
   } finally {
     child.off('exit', exitMarker);
@@ -92,6 +103,7 @@ class PythonBreakpointEvaluationSession {
   private state: 'initializing' | 'running' | 'completed' | 'errored' = 'initializing';
   private listenersAttached = false;
   private supportsConfigurationDone = false;
+  private readonly pendingStoppedEvents: DebugProtocol.StoppedEvent[] = [];
 
   constructor(
     args: DebugScriptArguments,
@@ -113,7 +125,6 @@ class PythonBreakpointEvaluationSession {
     return new Promise<DebugScriptResponse>((resolve) => {
       this.resolvePromise = resolve;
       this.attachListeners();
-      this.startTimeout();
       void this.runDebugger().catch((error) => {
         this.settleWithError(error);
       });
@@ -174,7 +185,7 @@ class PythonBreakpointEvaluationSession {
     await this.sendConfigurationDone();
     await attachPromise;
 
-    this.state = 'running';
+    this.enterRunningState();
   }
 
   private sendConfigurationDone(): Promise<DebugProtocol.ConfigurationDoneResponse | DebugProtocol.SetExceptionBreakpointsResponse> {
@@ -196,9 +207,10 @@ class PythonBreakpointEvaluationSession {
 
   private startTimeout(): void {
     this.clearTimeout();
+    const timeout = normalizeTimeout(this.args.timeout);
     this.timeoutId = setTimeout(() => {
-      this.settleWithError(new Error(`Timeout waiting for breakpoint after ${this.args.timeout}ms`));
-    }, this.args.timeout);
+      this.settleWithError(new Error(`Timeout waiting for breakpoint after ${timeout}ms`));
+    }, timeout);
   }
 
   private clearTimeout(): void {
@@ -217,6 +229,19 @@ class PythonBreakpointEvaluationSession {
   };
 
   private readonly handleStoppedEvent = (event: DebugProtocol.StoppedEvent) => {
+    if (this.state === 'completed' || this.state === 'errored') {
+      return;
+    }
+
+    if (this.state !== 'running') {
+      this.pendingStoppedEvents.push(event);
+      return;
+    }
+
+    this.processStoppedEvent(event);
+  };
+
+  private processStoppedEvent(event: DebugProtocol.StoppedEvent): void {
     if (this.state !== 'running') {
       return;
     }
@@ -229,7 +254,29 @@ class PythonBreakpointEvaluationSession {
     void this.processStoppedThread(threadId).catch((error) => {
       this.settleWithError(error);
     });
-  };
+  }
+
+  private enterRunningState(): void {
+    if (this.state === 'running') {
+      return;
+    }
+
+    this.state = 'running';
+    this.startTimeout();
+    this.flushPendingStoppedEvents();
+  }
+
+  private flushPendingStoppedEvents(): void {
+    if (this.pendingStoppedEvents.length === 0) {
+      return;
+    }
+
+    const events = [...this.pendingStoppedEvents];
+    this.pendingStoppedEvents.length = 0;
+    for (const event of events) {
+      this.processStoppedEvent(event);
+    }
+  }
 
   private async processStoppedThread(threadId: number): Promise<void> {
     let stackFrames: DebugProtocol.StackFrame[] = [];
@@ -390,6 +437,7 @@ class PythonBreakpointEvaluationSession {
     this.state = nextState;
     this.clearTimeout();
     this.detachListeners();
+    this.pendingStoppedEvents.length = 0;
 
     const resolve = this.resolvePromise;
     this.resolvePromise = null;
@@ -401,6 +449,13 @@ class PythonBreakpointEvaluationSession {
   private isSettled(): boolean {
     return this.state === 'completed' || this.state === 'errored';
   }
+}
+
+function normalizeTimeout(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  return DEFAULT_BREAKPOINT_TIMEOUT_MS;
 }
 
 function parseJsonResult(result: string): { parsed: true; value: unknown } | { parsed: false } {
