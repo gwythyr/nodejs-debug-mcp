@@ -31,12 +31,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gwythyr/nodejs-debug-mcp.git"
+    "url": "git+https://github.com/gwythyr/mcp-debug-unit.git"
   },
   "bugs": {
-    "url": "https://github.com/gwythyr/nodejs-debug-mcp/issues"
+    "url": "https://github.com/gwythyr/mcp-debug-unit/issues"
   },
-  "homepage": "https://github.com/gwythyr/nodejs-debug-mcp#readme",
+  "homepage": "https://github.com/gwythyr/mcp-debug-unit#readme",
   "engines": {
     "node": ">=18"
   },
